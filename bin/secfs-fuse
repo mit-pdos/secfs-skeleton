@@ -1,0 +1,676 @@
+#!/usr/bin/env python3
+import os
+import sys
+import stat
+import time
+import errno
+import pickle
+import llfuse
+import logging
+from llfuse import FUSEError
+
+import secfs.access
+import secfs.store
+import secfs.fs
+
+# Welcome to the SecFS secure file system.
+# This is the main entry point for all FUSE file system operations.
+# This file acts as a client, and interacts with a SecFS server concurrently
+# with other clients. The integrity of the file system is verified using
+# cryptography similar to in SUNDR, and read-protection is implemented by
+# symmetrically encrypting file contents and sharing the symmetric key with
+# known public keys.
+#
+# After mounting a SecFS share, most file system operations should function
+# normally, with some exceptions:
+#
+#  - Files are *either* user *or* group writeable. There are no world-writeable
+#    files in SecFS.
+#  - Files can be readable by either everyone, a group, or a user. If a group
+#    with read access to some file f changes, the set of users that can read f
+#    will not change.
+#  - Users must explicitly set their files as group-writeable by masking the
+#    user-write bit (umask 0200).
+#  - Users must explicitly mark files as read-protected by masking the
+#    world-readable bit (umask 0004).
+#  - The owner of a group-writeable file will be shown as the user that last
+#    edited the file, similar to in SUNDR.
+# TODO: user-writeable, but group-readable
+
+# The following datastructures are used to keep mappings from virtual inodes
+# and file handles (i.e. the ones that FUSE shows the user), and the handles
+# used internally in SecFS. These should never be useful further down the stack
+# (for example, the server should never see such handles), and so they fit well
+# here.
+# NOTE: an "i" is a tuple containing (principal, inumber)
+# where principal is (uid/gid, F/T (for is_group))
+
+# rinodes maps i handles to inodes as exposed by FUSE
+rinodes = {
+    # i => inode
+}
+# indoes maps FUSE indoes to i handles
+inodes = {
+    # inode => i
+}
+
+def alloc_inode(i):
+    """
+    alloc_inode will allocate a new FUSE inode number, and map it to the given
+    i. It returns the new inode number.
+    """
+    rinodes[i] = len(rinodes)+1 # +1 because llfuse.root_INODE = 1
+    inodes[rinodes[i]] = i
+    return rinodes[i]
+
+# fhs maintains information about open file handles
+fhs = {
+    # file handle => (i, uid)
+}
+
+def new_fh(i, uid):
+    """
+    new_fh will allocate a new file handle identifier, and map it to the given
+    i. The file handle will also be associated with the user principal with the
+    given uid.
+    """
+    global fhs
+
+    fh = 0
+    while fh in fhs:
+        fh += 1
+
+    fhs[fh] = (i, (uid, False))
+    return fh
+
+# llfuse does not expose fuse_get_context, and so there are some file
+# operations that we do not know which user is performing. This has been
+# reported upstream: https://bitbucket.org/nikratio/python-llfuse/issues/59/add-api-function-to-get-current-context
+# lastctx caches the context from previous file operations, which will give us
+# an (often incorrect) estimate of which user is performing an action.
+# Fixed in https://bitbucket.org/nikratio/python-llfuse/commits/3c069cf8efbf (currently unreleased)
+lastctx = None
+
+class SecFS(llfuse.Operations):
+    """
+    This class represents a single SecFS client, and implements a number of
+    FUSE file operations.
+
+    The information needed to mount a particular SecFS share is the server's
+    URI, the share's name, a path to the public key trusted to manage the given
+    share, and a list of private keys. The client will only be able to perform
+    file operations as the users it posesses the private keys for.
+
+    If the given share does not exist, it is created with the current user's
+    credentials, and that user's public key is placed in the given root public
+    key file.
+    """
+    def __init__(self, server_uri, share, root_pubkey, privkeys):
+        self.root_pubkey = root_pubkey
+        self.server_uri = server_uri
+        self.privkeys = privkeys
+        self.share = share
+        super()
+
+    def _pre(self, user, do_refresh=True):
+        """
+        _pre should be called before every file system operation to avoid
+        modifying the share while other clients are doing so. it will get an
+        exclusive lock from the server, and update the VSL cache so that any
+        operation will act upon the latest state of the system. any function
+        that call pre() should eventually call post().
+
+        If do_refresh is true, principal public keys and group memberships will
+        also be re-read from /.users and /.groups respectively.
+        """
+        self.server.lock()
+        if do_refresh:
+            secfs.tables.pre(_reload_principals, user)
+        else:
+            secfs.tables.pre(None, user)
+
+    def _post(self, push_vs=True):
+        """
+        Releases the exclusive server lock obtained by calling pre().
+        """
+        secfs.tables.post(push_vs)
+        self.server.unlock()
+
+    def _post_and_getattr(self, i):
+        """
+        Calls getattr on i, then calls self._post, then returns the getattr.
+        """
+        attr = _getattr(i)
+        self._post()
+        return attr
+
+    def init(self):
+        """
+        Called by FUSE when mounting the file system.
+
+        init will connect to the SecFS server, look for a root i for the given
+        share, and if none is found, initialize that share (see secfs.fs.init).
+        It will then set up FUSE inodes for the root and load all given private
+        keys.
+        """
+
+        ###
+        ## DO NOT CHANGE THIS FUNCTION
+        ###
+
+        mounter = None
+
+        # import/generate all private keys -- infer user ID from file name
+        import re
+        kf = re.compile('^.*/user-(\d+)-key.pem$')
+        for f in self.privkeys:
+            if "/" not in f:
+                f = "./{}".format(f)
+
+            m = kf.search(f)
+            if m is None:
+                print("invalid private key file name {}".format(f))
+                continue
+            uid = int(m.group(1))
+            if mounter is None:
+                mounter = uid
+
+            import os.path
+            if not os.path.exists(f):
+                secfs.crypto.generate_key(uid)
+
+            secfs.crypto.register_keyfile(uid, f)
+
+        import Pyro4.util
+        # get remote stack traces
+        sys.excepthook = Pyro4.util.excepthook
+        # connect to server
+        self.server = Pyro4.Proxy(self.server_uri)
+        # expose server to tables (to fetch VSL)
+        secfs.tables.register(self.server)
+        # expose server to store.block for block storage
+        secfs.store.block.register(self.server)
+
+        # check whether filesystem has been initialized
+        root = self.server.root(self.share)
+        if root == None:
+            if mounter not in secfs.crypto.keys:
+                print("no private key given for creator of file system")
+                raise llfuse.FUSEError(errno.EINVAL)
+
+            print("no root for {} established; creating...".format(self.share))
+
+            # generate root private key
+            mpub = secfs.crypto.generate_key(mounter)
+            secfs.crypto.register_keyfile(mounter, 'user-{}-key.pem'.format(mounter))
+
+            # export root public key
+            from cryptography.hazmat.primitives import serialization
+            public_key = secfs.crypto.keys[mounter].public_key()
+            pem = public_key.public_bytes(
+               encoding=serialization.Encoding.PEM,
+               format=serialization.PublicFormat.SubjectPublicKeyInfo
+            )
+            with open(self.root_pubkey, 'wb') as f:
+                f.write(pem)
+
+            # initialize a new share, and tell the server about it. don't
+            # refresh the user and group maps, as they have not yet been built.
+            self._pre(mounter, False)
+            root = secfs.fs.init((mounter, False),
+                {uid: secfs.crypto.generate_key(uid) for uid in secfs.crypto.keys},
+                {100: [uid for uid in secfs.crypto.keys if uid != 666]}
+            )
+            self.server.create(self.share, root)
+            self._post()
+
+        print("root is at", root)
+
+        # map FUSE inode root to real SecFS root
+        global rinodes
+        rinodes[root] = llfuse.ROOT_INODE
+        global inodes
+        inodes[llfuse.ROOT_INODE] = root
+
+        # load root trust for share
+        from cryptography.hazmat.primitives.serialization import load_pem_public_key
+        from cryptography.hazmat.backends import default_backend
+        with open(self.root_pubkey, 'rb') as f:
+            pem = f.read()
+            secfs.fs.root_i = root
+            secfs.fs.owner = root[0][0]
+            secfs.fs.usermap[root[0][0]] = load_pem_public_key(pem, backend=default_backend())
+
+        # Set up lastctx in case one of the non-context methods are called first
+        global lastctx
+        lastctx = llfuse.RequestContext()
+        lastctx.uid = mounter
+        lastctx.gid = int(os.getegid())
+        lastctx.umask = 0o022
+
+        self._pre(mounter)
+        self._post(False)
+
+
+    ## All following methods are FUSE standard
+    ## See https://pythonhosted.org/llfuse/operations.html
+    ## and http://fuse.sourceforge.net/doxygen/structfuse__operations.html
+
+    def lookup(self, inode_p, name):
+        print("LOOKUP", inode_p, name)
+
+        global lastctx
+        self._pre(lastctx.uid)
+        i = secfs.store.tree.find_under(inodes[inode_p], name)
+        if i == None:
+            self._post()
+            raise llfuse.FUSEError(errno.ENOENT)
+
+        return self._post_and_getattr(i)
+
+    def getattr(self, inode):
+        print("GETATTR", inode)
+
+        try:
+            global lastctx
+            self._pre(lastctx.uid)
+        except LookupError as e:
+            self._post()
+            print(e)
+            raise llfuse.FUSEError(errno.ENOENT)
+
+        return self._post_and_getattr(inodes[inode])
+
+    def opendir(self, inode):
+        print("OPENDIR", inode)
+
+        global lastctx
+        self._pre(lastctx.uid)
+
+        i = inodes[inode]
+        node = secfs.fs.get_inode(i)
+        if node.kind != 0:
+            raise llfuse.FUSEError(errno.ENOTDIR)
+
+        ret = new_fh(i, lastctx.uid)
+        self._post()
+        return ret
+
+    def readdir(self, fh, off):
+        print("READDIR", fh, off)
+
+        self._pre(fhs[fh][1][0])
+        node = secfs.fs.get_inode(fhs[fh][0])
+        if node.kind != 0:
+            raise llfuse.FUSEError(errno.ENOTDIR)
+
+        for e, o in secfs.fs.readdir(fhs[fh][0], off):
+            print (e[0].decode('utf-8'), e[1], o)
+            yield (e[0], _getattr(e[1]), o)
+
+        self._post()
+
+    def open(self, inode, flags):
+        print("OPEN", inode, flags)
+
+        global lastctx
+        self._pre(lastctx.uid)
+
+        i = inodes[inode]
+        node = secfs.fs.get_inode(i)
+        if node.kind != 1:
+            raise llfuse.FUSEError(errno.EISDIR)
+
+        ret = new_fh(i, lastctx.uid)
+        self._post()
+        return ret
+
+    def access(self, inode, mode, ctx):
+        print("ACCESS", inode, mode, ctx.uid, ctx.gid, ctx.umask)
+        global lastctx
+        lastctx = ctx
+
+        i = inodes[inode]
+
+        if mode == os.F_OK:
+            return secfs.tables.resolve(i) != None
+
+        if (mode & os.R_OK) == os.R_OK:
+            if not secfs.access.can_read(ctx.uid, i):
+                return False
+
+        if (mode & os.W_OK) == os.W_OK:
+            if not secfs.access.can_write(ctx.uid, i):
+                return False
+
+        if (mode & os.X_OK) == os.X_OK:
+            if not secfs.access.can_execute(ctx.uid, i):
+                return False
+
+        return True
+
+    def read(self, fh, offset, length):
+        print("READ", fh, offset, length)
+
+        try:
+            fh = fhs[fh]
+            self._pre(fh[1][0])
+            ret = secfs.fs.read(fh[1], fh[0], offset, length)
+            self._post()
+            return ret
+        except PermissionError as e:
+            print("Illegal access:", e)
+            self._post()
+            raise llfuse.FUSEError(errno.EACCES)
+        except:
+            self._post()
+            raise
+
+    def mkdir(self, parent_inode, name, mode, ctx):
+        print("MKDIR", parent_inode, name, mode, ctx)
+
+        # Store ctx for the other methods that don't receive one
+        global lastctx
+        lastctx = ctx
+        self._pre(ctx.uid)
+
+        who = (ctx.uid, False)
+        if (ctx.umask & 0o200) != 0:
+            # user gave up write permission, so donating to group
+            who = (ctx.gid, True)
+
+        encrypt = False
+        if (ctx.umask & 0o004) != 0:
+            # user masked world-readable, so encrypting file
+            encrypt = True
+
+        try:
+            i = secfs.fs.mkdir(inodes[parent_inode], name, (ctx.uid, False), who)
+            return self._post_and_getattr(i)
+        except PermissionError as e:
+            print("Illegal access:", e)
+            self._post()
+            raise llfuse.FUSEError(errno.EACCES)
+        except:
+            self._post()
+            raise
+
+    def create(self, parent_inode, name, mode, flags, ctx):
+        print("CREATE", parent_inode, name, mode, flags, ctx)
+
+        # Store ctx for the other methods that don't receive one
+        global lastctx
+        lastctx = ctx
+        self._pre(ctx.uid)
+
+        who = (ctx.uid, False)
+        if (ctx.umask & 0o200) != 0:
+            # user gave up write permission, so donating to group
+            who = (ctx.gid, True)
+
+        encrypt = False
+        if (ctx.umask & 0o004) != 0:
+            # user masked world-readable, so encrypting file
+            encrypt = True
+
+        try:
+            i = secfs.fs.create(inodes[parent_inode], name, (ctx.uid, False), who)
+            ret = (new_fh(i, ctx.uid), _getattr(i))
+            self._post()
+            return ret
+        except PermissionError as e:
+            print("Illegal access:", e)
+            self._post()
+            raise llfuse.FUSEError(errno.EACCES)
+        except:
+            self._post()
+            raise
+
+    def write(self, fh, off, buf):
+        print("WRITE", fh, off, buf)
+
+        try:
+            fh = fhs[fh]
+            self._pre(fh[1][0])
+            ret = secfs.fs.write(fh[1], fh[0], off, buf)
+            self._post()
+            return ret
+        except PermissionError as e:
+            print("Illegal access:", e)
+            self._post()
+            raise llfuse.FUSEError(errno.EACCES)
+        except:
+            self._post()
+            raise
+
+    def setattr(self, inode, attr):
+        if attr.st_uid is not None:
+            raise llfuse.FUSEError(errno.ENOSYS)
+        if attr.st_gid is not None:
+            raise llfuse.FUSEError(errno.ENOSYS)
+
+        global lastctx
+        who = (lastctx.uid, False)
+
+        self._pre(lastctx.uid)
+        i = inodes[inode]
+
+        if not secfs.access.can_write(who[0], i):
+            self._post()
+            if i[0][1]:
+                print("cannot setattr on group-owned file {0} as {1}; user is not in group".format(i, who))
+            else:
+                print("cannot setattr on user-owned file {0} as {1}".format(i, who))
+            raise llfuse.FUSEError(errno.EACCES)
+
+        node = secfs.fs.get_inode(i)
+        if attr.st_mode is not None:
+            node.ex = (attr.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)) != 0
+            # TODO: warn if trying to change other bits -- has no effect.
+        if attr.st_size is not None:
+            if attr.st_size == 0:
+                node.blocks = []
+                node.size = 0
+            else:
+                # NOTE: we could technically do this, but it is much more
+                # involved. Would need to decrypt, truncate/extend, and then
+                # re-encrypt. Meh.
+                self._post()
+                raise llfuse.FUSEError(errno.ENOSYS)
+        if attr.st_mtime is not None:
+            node.mtime = attr.st_mtime
+
+        # metadata changed, so update change time
+        node.ctime = time.time()
+
+        # NOTE: we ignore attr.st_atime as we do not store access times. we
+        # don't want to return an error though, because this would be reported
+        # as failure by touch et. al.
+
+        # put new hash in tree
+        new_hash = secfs.store.block.store(node.bytes())
+        secfs.tables.modmap(who, i, new_hash)
+        return self._post_and_getattr(i)
+
+    def mknod(self, parent_inode, name, mode, rdev, ctx):
+        # This is a bit of a hack, and deserves some explanation.
+        # llfuse does not give us a FUSE context for open() and opendir(),
+        # which leads us to guess which user is trying to do the open (this is
+        # what lastctx is used for). A ticket has been opened, and a fix is
+        # scheduled, but the lab had to be posted before a fix was released:
+        #
+        #   https://bitbucket.org/nikratio/python-llfuse/issues/59/add-api-function-to-get-current-context
+        #
+        # Replicating the issue can be done easily enough by:
+        #
+        #    $ sudo bash -c 'umask 0200; sg users "echo x > mnt/shared"; umask 0022'
+        #    $ ls -l mnt/shared
+        #    -r--rw-r-- 1 root users   2 Sep 17 15:03 shared
+        #    $ id
+        #    uid=1000(jon) gid=100(users)
+        #    $ echo x | sudo tee -a mnt/shared
+        #    $ ls -l mnt/shared
+        #    -r--rw-r-- 1 jon  users   4 Sep 17 15:03 shared
+        #
+        # This happens because the user of the last operation prior to the open
+        # is assumed to have issued the open. However, this is not the case
+        # above. The previous operation was the ls by user 1000, so they are
+        # assumed to be making the edit. In this case, no error is given
+        # because user 1000 is in the group users, but if they weren't, a
+        # permission denied error would be printed.
+        #
+        # Hijacking mknod is a hack that is used by test.sh to give the file
+        # system correct information about who is performing a particular open
+        # or opendir call. The call will fail, but the information about which
+        # user called it will be stored, and then re-used by open and opendir
+        # later.
+        global lastctx
+        lastctx = ctx
+        raise llfuse.FUSEError(errno.ENOSYS)
+
+
+def _reload_principals():
+    """
+    Reloads the set of known principals by reading and parsing /.users and
+    /.groups, and the repopulating secfs.fs.usermap and secfs.fs.groupmap.
+    """
+    def _read_file(fname):
+        """
+        Simple helper function for reading the pickled contents of a SecFS file
+        located in the root of the file system.
+        """
+        return pickle.loads(
+                secfs.fs.get_inode(
+                    secfs.store.tree.find_under(secfs.fs.root_i, fname)
+                )
+                .read()
+            )
+
+    # load group map
+    secfs.fs.groupmap = _read_file(b".groups")
+
+    # load user public key map (and decode their PEM-encoded public keys)
+    from cryptography.hazmat.primitives.serialization import load_pem_public_key
+    from cryptography.hazmat.backends import default_backend
+    secfs.fs.usermap = {}
+    for p, pem in _read_file(b".users").items():
+        secfs.fs.usermap[p] = load_pem_public_key(pem, backend=default_backend())
+
+def _getattr(i):
+    """
+    _getattr produces an llfuse.EntryAttributes object with information about
+    filat at the given i, including FUSE inode number, size, modification and
+    creation time, and permission bits.
+
+    See https://pythonhosted.org/llfuse/data.html#llfuse.EntryAttributes
+    """
+    if i not in rinodes:
+        alloc_inode(i)
+
+    n = secfs.fs.get_inode(i)
+
+    # Fill entry with known attributes
+    entry = llfuse.EntryAttributes()
+    entry.st_ino = rinodes[i]
+    entry.st_mtime = n.mtime
+    entry.st_ctime = n.ctime
+    entry.st_size = n.size
+
+    # Unused attributes
+    entry.entry_timeout = 300
+    entry.attr_timeout = 300
+    entry.st_blksize = 512
+    entry.generation = 0
+    entry.st_blocks = 1
+    entry.st_nlink = 1
+    entry.st_atime = 0
+    entry.st_rdev = 0
+
+    # Mode gets complicated
+    # if isn't needed, only here to make code easier to visually parse
+    if True:
+        entry.st_mode = 0
+        if n.kind == 0:
+            entry.st_mode |= stat.S_IFDIR
+            entry.st_mode |= stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+        else:
+            entry.st_mode |= stat.S_IFREG
+
+        # Is it encrypted (i.e. limited read access)?
+        entry.st_mode |= stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
+
+        # Who can write (i.e. owned by group or user)?
+        if i[0][1]:
+            # owned by group
+            entry.st_mode |= stat.S_IWGRP
+            entry.st_gid = i[0][0]
+
+            # who wrote last?
+            real_i = secfs.tables.resolve(i, False)
+            entry.st_uid = real_i[0][0]
+        else:
+            entry.st_mode |= stat.S_IWUSR
+            entry.st_uid = i[0][0]
+            entry.st_gid = 0
+
+        # Who can execute? Those who can read if node.ex is True
+        if n.ex:
+            if entry.st_mode & stat.S_IRUSR:
+                entry.st_mode |= stat.S_IXUSR
+            if entry.st_mode & stat.S_IRGRP:
+                entry.st_mode |= stat.S_IXGRP
+            if entry.st_mode & stat.S_IROTH:
+                entry.st_mode |= stat.S_IXOTH
+
+    return entry
+
+# Give us all the debug output
+log = logging.getLogger()
+def init_logging():
+    formatter = logging.Formatter('%(message)s')
+    handler = logging.StreamHandler()
+    handler.setFormatter(formatter)
+    handler.setLevel(logging.INFO)
+    log.setLevel(logging.INFO)
+    log.addHandler(handler)
+
+if __name__ == '__main__':
+    ###
+    ## DO NOT CHANGE THIS CODE
+    ###
+
+    if len(sys.argv) < 5:
+        print('Usage: %s SERVER_URI MOUNTPOINT ROOT_TRUST KEYFILE...' % sys.argv[0])
+        print("Connect to the server at SERVER_URI, and mount the / share at MOUNTPOINT.")
+        print("Verify that the share is owned by the principal whose public key is ROOT_TRUST.")
+        print("Only file operations performed by users whose KEYFILE is known are permitted.")
+        print("The file name of each KEYFILE should be user-UID-key.pem. They need not exist.")
+        print("")
+        print("If the / share does not exist, create it using the key of the current user.")
+        print("In this case, the current user's public key will be written to ROOT_TRUST.")
+        raise SystemExit()
+
+    init_logging()
+
+    import faulthandler
+    faulthandler.enable()
+    server_uri = sys.argv[1]
+    mountpoint = sys.argv[2]
+    sfs = SecFS(server_uri, "/", sys.argv[3], sys.argv[4:])
+
+    # allow_other allows us to mount a file system as root, but still access it
+    # as another user. requires user_allow_other in /etc/fuse.conf to function
+    # for non-root users.
+    llfuse.init(sfs, mountpoint, ['fsname=tmpfs', "nonempty", "allow_other"])
+
+    try:
+        # let test script know we are open for business
+        print("ready")
+        sys.stdout.flush()
+
+        llfuse.main(single=True)
+    except:
+        llfuse.close(unmount=False)
+        raise
+
+    llfuse.close()

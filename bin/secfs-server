@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+
+import threading
+seq_lock = threading.Lock()
+
+class SecFSRPC():
+    def __init__(self):
+        self.roots = {}
+
+        #
+        # NOTE: All your server state *must* go here.
+        #
+        self.blocks = {
+                # chash => block
+        }
+
+
+    def lock(self):
+        # global client lock
+        global seq_lock
+        seq_lock.acquire()
+
+    def unlock(self):
+        # TODO: authenticate
+        global seq_lock
+        seq_lock.release()
+
+    def create(self, name, root_i):
+        if name in self.roots:
+            return None
+
+        print("ESTABLISHED ROOT", root_i, "FOR", name)
+        self.roots[name] = root_i
+        return root_i
+
+    def root(self, name):
+        if name in self.roots:
+            print("FILE SYSTEM", name, "IS ROOTED AT", self.roots[name])
+            return self.roots[name]
+        print("FILE SYSTEM", name, "HAS NO ROOT")
+        return None
+
+    def read(self, chash):
+        if chash in self.blocks:
+            return self.blocks[chash]
+        return None
+
+    def store(self, blob):
+        if "data" in blob:
+            import base64
+            blob = base64.b64decode(blob["data"])
+
+        import hashlib
+        chash = hashlib.sha224(blob).hexdigest()
+        self.blocks[chash] = blob
+        return chash
+
+
+import sys
+if len(sys.argv) != 2:
+    raise SystemExit('Usage: %s <server-socket>' % sys.argv[0])
+
+server = SecFSRPC()
+
+# Allow test scripts to release locks in the case of crashes
+import signal
+def unlock(signum, frame):
+    try:
+        server.unlock()
+    except:
+        global seq_lock
+        import threading
+        seq_lock = threading.Lock()
+
+signal.signal(signal.SIGUSR1, unlock)
+
+# Enable testing script to perform forking attacks for arbitrary server impls.
+pickled = None
+forked = False
+def forker(signum, frame):
+    import pickle
+    global pickled
+    global server
+
+    import copy
+    data = copy.deepcopy(server.__dict__)
+    del data["_pyroDaemon"]
+
+    global forked
+    if not forked:
+        print("forking server with state: {}".format(data))
+        pickled = pickle.dumps(data)
+        forked = True
+    else:
+        print("restoring server to forking point...")
+        print("current state will be lost: {}".format(data))
+        for a, v in pickle.loads(pickled).items():
+            setattr(server, a, v)
+        pickled = None
+        forked = False
+
+signal.signal(signal.SIGUSR2, forker)
+
+
+import Pyro4
+# NOTE: should use multiplex here to avoid race with state recovery for forking
+# trick, but we can't, because Pyro4 is broken in its signal handling for the
+# 'multiplex' backend: https://github.com/irmen/Pyro4/issues/92
+# Instead, we just assume that the tests don't hit this (which should be
+# sensible as the signal is sent with no currently running file system
+# operations).
+#Pyro4.config.SERVERTYPE = "multiplex" # otherwise the fork trick won't work
+daemon = Pyro4.Daemon(unixsocket=sys.argv[1])
+uri = daemon.register(server, objectId="secfs")
+print("uri =", uri)
+sys.stdout.flush()
+
+daemon.requestLoop()
