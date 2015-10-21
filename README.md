@@ -288,11 +288,12 @@ In order to write this code, you should first try to build a cursory
 understanding of the `secfs.tables.modmap` function, which modifies the
 `i`-tables that map `i`s to block hashes. This is a critical component
 of SecFS, and is used extensively throughout the code. For adding `.`
-and `..`, you should look at `secfs.store.tree_add`, and for linking in
+and `..`, you should look at `secfs.store.tree.add`, and for linking in
 the final `i`, you will need to use `secfs.fs.link` (or just `link`
 since `_create` is in the same file). To store data on the server, you
 will also need to use the relatively straightforward
-`secfs.store.block.store`.
+`secfs.store.block.store`. You may find `secfs.fs.init` a useful
+starting point.
 
 When you have implemented `_create` successfully, you should be able to
 create new files and directories as root in the root of the file system.

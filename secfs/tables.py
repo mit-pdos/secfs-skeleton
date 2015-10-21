@@ -106,6 +106,8 @@ def modmap(mod_as, i, ihash):
 
       1. Allocate an i as mod_as
       2. Allocate/change the group i to point to the new i above
+
+    modmap returns the given i, with i[1] filled in if it was passed as None.
     """
     assert not mod_as[1] # only real users can mod
 
