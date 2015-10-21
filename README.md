@@ -101,7 +101,7 @@ with this file system:
    user by default, only root can create new files in it. Thus, trying
    to run `touch mnt/x` as a regular user will *not* work. You will need
    to do `sudo touch mnt/x`.
- - SecFS only supports a limited subset of file system operations, so
+ - SecFS only supports a limited subset of file-system operations, so
    certain commands may give strange-looking "Function not implemented"
    errors. For example, since the removal of a file is not implemented,
    calling `rm` will fail. Do not fret, this is expected behavior.
@@ -160,7 +160,7 @@ In SecFS, files and directories both consist of an inode structure (in
 `secfs/store/inode.py`) holding various metadata about each file, and a
 list of block hashes that, when fetched and concatenated, make up the
 contents of the file. Directories are lists of name/`i` pairs, which can
-be resolved and fetched recursively to explore the file system tree.
+be resolved and fetched recursively to explore the file-system tree.
 Files are updated by sending new blobs to the server, and then updating
 the `i`-table of the owning principal so that the `i` of the file that is
 being changed points to the new signature.
@@ -178,7 +178,7 @@ down in the file system.
 
 ## Deliverables
 
-The final result of this project should be a functional file system
+The final result of this project should be a functional file-system
 implementation that meets the requirements set forth below, along with a
 short (one single-sided US letter size page, 12pt font) document
 describing its design. The design document should detail any non-trivial
@@ -249,7 +249,7 @@ may be subject to further evaluation based on your protocol description.
 
 ## Guiding exercises
 
-This file system implementation is a fairly complex piece of software,
+This file-system implementation is a fairly complex piece of software,
 and it can be hard to decide where to start hacking. We therefore give
 you a series of exercises that you may choose to follow to guide your
 implementation. We do not **require** that you follow these steps as
@@ -309,7 +309,7 @@ second SecFS client (see "Interacting with the file system") on a
 separate mount point, and be able to run `ls -la` to reveal the `.users`
 and `.groups` files. To do so, you will have to replace the
 `current_itables` map in `secfs/tables.py`, which maps user and group
-handles to file hashes, with SUNDRs Version Structure List (see section
+handles to file hashes, with SUNDR's Version Structure List (see section
 3.3.2 of the paper). This list must be communicated to the server so
 that other clients can download it, and then use those mappings to
 explore the file system.
@@ -335,7 +335,7 @@ Appendix A.
 
 Since the root directory is only modifiable by the owner of the file
 system, SUNDR introduces group-writeable directories (and files). The
-file system owner can create such a directory in the root of the file
+file-system owner can create such a directory in the root of the file
 system (e.g. `/home`), and other users who are members of the
 appropriate group will then be able to add their own directories inside
 of it. Group membership is set in the `.groups` file, which we
@@ -447,10 +447,10 @@ so if you wish.
 
 ## Ideas for improvements
 
- - Currently, the server does not try to avoid file system corruption.
+ - Currently, the server does not try to avoid file-system corruption.
    This does not affect confidentiality or integrity, but it does mean
    that a malicious user can impact availability even if the server is
-   not malicious. You might want to make the server smarted, and have it
+   not malicious. You might want to make the server smarter, and have it
    prevent unauthorized users from being able to corrupt the file
    system.
  - As a challenge, you may want to think about providing freshness
@@ -482,14 +482,14 @@ so if you wish.
  - The implementation only supports adding and writing to files, but not
    deleting or moving them. There is also no support for things like
    chmod (for the executable flag and ctime/mtime). Adding this should
-   be straightforward (except perhaps not atomic rename).
+   be straightforward (except perhaps for atomic rename).
 
 ## Appendix A: Multiple file systems
 
-In SUNDR, only the file system owner can create files in the root of the
+In SUNDR, only the file-system owner can create files in the root of the
 file system. The only way to enable other users to create and modify
 files is by creating a group-writeable directory, which users then
-create their own hierarchies inside. For example, the file system owner
+create their own hierarchies inside. For example, the file-system owner
 might create the folder `/home`, and make it group-owned by the group
 `users`, of which all users are a member of. Users `A` and `B` can both
 create private directories inside `/home`, since they can modify the
@@ -501,12 +501,12 @@ simply delete `B` home directory! The data won't actually go away, as
 `A` cannot modify `B`'s `i`-table, but it will be annoying for `B` to
 recover.
 
-SUNDRs solution to this is to have the server host multiple file
+SUNDR's solution to this is to have the server host multiple file
 systems. We can multiplex multiple instances of SUNDR on a single
 server by simply allowing the server to store the root `i` for multiple
 file systems. The server and client code we provide you with already has
-support for this feature --- the server keeps a mapping from file system
-mount points (like `/`) to that file system's root `i`, and clients name
+support for this feature --- the server keeps a mapping from each file-system
+mount point (like `/`) to that file system's root `i`, and clients name
 the file system they want the root for (always `/` in the tests) when
 mounting. Given the root `i`, every other part of SUNDR works the same
 way: clients will check that the `i`-table for the root `i` is signed by

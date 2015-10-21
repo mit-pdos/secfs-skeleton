@@ -271,14 +271,8 @@ class SecFS(llfuse.Operations):
     def getattr(self, inode):
         print("GETATTR", inode)
 
-        try:
-            global lastctx
-            self._pre(lastctx.uid)
-        except LookupError as e:
-            self._post()
-            print(e)
-            raise llfuse.FUSEError(errno.ENOENT)
-
+        global lastctx
+        self._pre(lastctx.uid)
         return self._post_and_getattr(inodes[inode])
 
     def opendir(self, inode):
