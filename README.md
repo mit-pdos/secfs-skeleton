@@ -16,11 +16,17 @@ guarantees. It is your job to extend this such that the goals outlined
 below are all met. The code we provide you with is a partial
 implementation of the serialized version of
 [SUNDR](https://www.usenix.org/legacy/event/osdi04/tech/full_papers/li_j/li_j.pdf).
-To complete this lab, you will have flesh out the rest of the
-implementation to support the entirety of serialized SUNDR, as well as
-add confidentiality guarantees (read-protection of files). For the
-latter, you will need to come up with a reasonable mechanism for
+You should read the SUNDR paper, as many of the concepts in this lab are
+taken from there. To complete this lab, you will have flesh out the
+rest of the implementation to support the entirety of serialized SUNDR,
+as well as add confidentiality guarantees (read-protection of files).
+For the latter, you will need to come up with a reasonable mechanism for
 encrypting files and distributing keys.
+
+If you feel as though you are somewhat rusty on file-systems and their
+implementations, you may want to re-read [The UNIX Time-Sharing
+System](https://web.mit.edu/6.033/www/papers/protected/cacm.html) from
+6.033.
 
 ## Motivation
 
@@ -146,15 +152,16 @@ IDs respectively. This loading is performed by `_reload_principals()` in
 `bin/secfs-fuse`.
 
 In SUNDR, every user also has an `i`-table, hosted by the server, which
-maps each of their file numbers to a block hash. In the skeleton code we
-give you, these tables are stored locally in a simple Python dictionary.
-These block hashes can be sent to the server, and the block contents
-(which can be verified using the hash) will be returned. Groups have
-`i`-table similar to users, but instead of mapping to block hashes, they
-map to a second, user-owned, `i`, which can then be resolved to reach
-the file contents. This indirection allows all members of a particular
-group to update a shared file while retaining the ability to verify the
-authenticity of all operations.
+maps each of their file numbers to a block hash. This is illustrated in
+Figure 2 in the paper. In the skeleton code we give you, these tables
+are stored locally in a simple Python dictionary.  These block hashes
+can be sent to the server, and the block contents (which can be verified
+using the hash) will be returned. Groups have `i`-table similar to
+users, but instead of mapping to block hashes, they map to a second,
+user-owned, `i`, which can then be resolved to reach the file contents.
+This indirection allows all members of a particular group to update a
+shared file while retaining the ability to verify the authenticity of
+all operations.
 
 In SecFS, files and directories both consist of an inode structure (in
 `secfs/store/inode.py`) holding various metadata about each file, and a
@@ -231,7 +238,9 @@ At a minimum, your file system should meet the following requirements:
  - **At least** one of the "Ideas for improvements" listed further down
    in this document, or some other non-trivial feature. This should be
    discussed in your design document, and you will be expected to
-   explain it during the checkoff with the TAs.
+   explain it during the checkoff with the TAs. If you wish to implement
+   a feature that is not in the list below, you should contact the
+   course staff first.
 
 For these requirements, the exact definition of a file is important. In
 particular, when we say that a file `f` is `p`-readable, what we mean is
@@ -254,7 +263,11 @@ and it can be hard to decide where to start hacking. We therefore give
 you a series of exercises that you may choose to follow to guide your
 implementation. We do not **require** that you follow these steps as
 long as you pass all the tests in the end, but we believe this is a
-sensible approach to solving the lab.
+sensible approach to solving the lab. Note that the tests are **not**
+divided by exercise in this lab; instead, you should run the commands
+mentioned in each exercise to determine if you have completed it. It
+will also generally be clear that you have completed an exercise from a
+sudden jump in the number of test PASSes.
 
 ### Exercise 0: Enable file/directory creation
 
@@ -483,6 +496,12 @@ so if you wish.
    deleting or moving them. There is also no support for things like
    chmod (for the executable flag and ctime/mtime). Adding this should
    be straightforward (except perhaps for atomic rename).
+ - Implement user key revocation. In particular, a user should be able
+   to generate a new private/public key-pair, and register this with the
+   file-system owner. Once the new key has been activated, the user
+   should be able to access all their old files with the same
+   permissions they used to have, and their old key should no longer be
+   usable to act as that user.
 
 ## Appendix A: Multiple file systems
 
