@@ -23,7 +23,7 @@ uxsock="$rundir/sock"
 . venv/bin/activate
 pip3 install --upgrade -e . > pip.log
 
-env PYTHONUNBUFFERED=1 venv/bin/secfs-server "$uxsock" > server.log &
+env PYTHONUNBUFFERED=1 venv/bin/secfs-server "$uxsock" > server.log 2> server.err &
 server=$!
 sync
 while ! grep -P "^uri =" server.log > /dev/null; do

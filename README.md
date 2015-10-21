@@ -41,7 +41,7 @@ these problems.
 First, you should get a copy of the SecFS source code:
 
 ```
-git clone https://github.com/mit-pdos/6.858-secfs.git secfs
+git clone https://github.com/mit-pdos/secfs-skeleton.git secfs
 cd secfs
 ```
 
@@ -123,10 +123,11 @@ single-client operations, and involve no confidentiality or integrity
 mechanisms. The tests that involve a second client (after "Entering
 section Second client") will likely cause your client to crash,
 indicated by a Python backtrace and the error "LookupError: asked to
-resolve i ((0, False), 0), but i does not exist". This is to be expected
-with the single-client implementation we provide you with, as the second
-client does not know of any files, and thus cannot find the file handle
-`(0, 0)`.
+resolve i ((0, False), 0), but i does not exist" in
+`./ro-client-with-root.err`. This is to be expected with the
+single-client implementation we provide you with, as the second client
+does not know of any files, and thus cannot find the file handle `(0,
+0)`.
 
 ## System overview
 
