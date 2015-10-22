@@ -129,7 +129,7 @@ single-client operations, and involve no confidentiality or integrity
 mechanisms. The tests that involve a second client (after "Entering
 section Second client") will likely cause your client to crash,
 indicated by a Python backtrace and the error "LookupError: asked to
-resolve i ((0, False), 0), but i does not exist" in
+resolve i (<uid=0>, 0), but i does not exist" in
 `./ro-client-with-root.err`. This is to be expected with the
 single-client implementation we provide you with, as the second client
 does not know of any files, and thus cannot find the file handle `(0,
@@ -142,14 +142,13 @@ SecFS consists of two primary components: a FUSE client
 communicate over RPC. SecFS's design is heavily inspired by SUNDR, and
 borrows many of the structures used therein. Specifically, the file
 system is organized around the notion of `i`-pairs, or `i`s for short.
-An `i`-pair is a tuple containing a principal identity (i.e. a user or
-group ID) and a file number. The principal identity is itself a tuple,
-with the first element giving the user's or group's numeric ID, and the
-second element a boolean indicating if the principal is a group. The
-server uses the two special files `/.users` and `/.groups` to store and
-recover the mapping from user ID to public key and from group ID to user
-IDs respectively. This loading is performed by `_reload_principals()` in
-`bin/secfs-fuse`.
+An `i`-pair is a tuple containing a principal identity (i.e. a `User` or
+`Group`, both mapped to a UNIX ID), and a file number. `i`-pairs are
+represented using the class `I`. These types are all defined in
+`secfs/types.py`. The server uses the two special files `/.users` and
+`/.groups` to store and recover the mapping from user ID to public key
+and from group ID to user IDs respectively. This loading is performed by
+`_reload_principals()` in `bin/secfs-fuse`.
 
 In SUNDR, every user also has an `i`-table, hosted by the server, which
 maps each of their file numbers to a block hash. This is illustrated in

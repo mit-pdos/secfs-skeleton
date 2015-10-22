@@ -6,16 +6,20 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
 from cryptography.fernet import Fernet
+from secfs.types import I, Principal, User, Group
 
 keys = {}
 
-def register_keyfile(uid, f):
+def register_keyfile(user, f):
     """
     Register the private key for the given user for use in signing/decrypting.
     """
+    if not isinstance(user, User):
+        raise TypeError("{} is not a User, is a {}".format(user, type(user)))
+
     with open(f, "rb") as key_file:
         k=key_file.read()
-        keys[uid] = serialization.load_pem_private_key(
+        keys[user] = serialization.load_pem_private_key(
             k,
             password=None,
             backend=default_backend()
@@ -35,17 +39,20 @@ def encrypt_sym(key, data):
     f = Fernet(key)
     return f.encrypt(data)
 
-def generate_key(uid):
+def generate_key(user):
     """
     Ensure that a private/public keypair exists in user-$uid-key.pem for the
     given user. If it does not, create one, and store the private key on disk.
     Finally, return the user's PEM-encoded public key.
     """
+    if not isinstance(user, User):
+        raise TypeError("{} is not a User, is a {}".format(user, type(user)))
+
     from cryptography.hazmat.primitives.asymmetric import rsa
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.backends import default_backend
 
-    f = "user-{}-key.pem".format(uid)
+    f = "user-{}-key.pem".format(user.id)
 
     import os.path
     if not os.path.isfile(f):

@@ -9,6 +9,7 @@ import secfs.store.block
 from secfs.store.inode import Inode
 from secfs.store.tree import Directory
 from cryptography.fernet import Fernet
+from secfs.types import I, Principal, User, Group
 
 # usermap contains a map from user ID to their public key according to /.users
 usermap = {}
@@ -38,6 +39,9 @@ def init(owner, users, groups):
     root, but not map it to any particular share at the server. The new root's
     i is returned so that this can be done by the caller.
     """
+    if not isinstance(owner, User):
+        raise TypeError("{} is not a User, is a {}".format(owner, type(owner)))
+
     node = Inode()
     node.kind = 0
     node.ex = True
@@ -46,7 +50,7 @@ def init(owner, users, groups):
     node.mtime = node.ctime
 
     ihash = secfs.store.block.store(node.bytes())
-    root_i = secfs.tables.modmap(owner, (owner, None), ihash)
+    root_i = secfs.tables.modmap(owner, I(owner), ihash)
     if root_i == None:
         raise RuntimeError
 
@@ -73,7 +77,7 @@ def init(owner, users, groups):
         node.blocks = [secfs.store.block.store(bts)]
 
         ihash = secfs.store.block.store(node.bytes())
-        i = secfs.tables.modmap(owner, (owner, None), ihash)
+        i = secfs.tables.modmap(owner, I(owner), ihash)
         link(owner, i, root_i, fn)
 
     return root_i
@@ -85,12 +89,22 @@ def _create(parent_i, name, create_as, create_for, isdir):
     using the credentials of create_as. This distinction is necessary as a user
     principal is needed for the final i when creating a file as a group.
     """
-    if create_for[1] and create_for[0] not in groupmap:
+    if not isinstance(parent_i, I):
+        raise TypeError("{} is not an I, is a {}".format(parent_i, type(parent_i)))
+    if not isinstance(create_as, User):
+        raise TypeError("{} is not a User, is a {}".format(create_as, type(create_as)))
+    if not isinstance(create_for, Principal):
+        raise TypeError("{} is not a Principal, is a {}".format(create_for, type(create_for)))
+
+    assert create_as.is_user() # only users can create
+    assert create_as == create_for or create_for.is_group() # create for yourself or for a group
+
+    if create_for.is_group() and create_for not in groupmap:
         raise PermissionError("cannot create for unknown group {}".format(create_for))
 
     # This check is performed by link() below, but better to fail fast
-    if not secfs.access.can_write(create_as[0], parent_i):
-        if parent_i[0][1]:
+    if not secfs.access.can_write(create_as, parent_i):
+        if parent_i.p.is_group():
             raise PermissionError("cannot create in group-writeable directory {0} as {1}; user is not in group".format(parent_i, create_as))
         else:
             raise PermissionError("cannot create in user-writeable directory {0} as {1}".format(parent_i, create_as))
@@ -114,7 +128,7 @@ def _create(parent_i, name, create_as, create_for, isdir):
     #    given name
     #
     # Also make sure that you *return the final i* for the new inode!
-    return ((0, False), 0)
+    return I(User(0), 0)
 
 def create(parent_i, name, create_as, create_for):
     """
@@ -134,8 +148,13 @@ def read(read_as, i, off, size):
     """
     Read reads [off:off+size] bytes from the file at i.
     """
-    if not secfs.access.can_read(read_as[0], i):
-        if i[0][1]:
+    if not isinstance(i, I):
+        raise TypeError("{} is not an I, is a {}".format(i, type(i)))
+    if not isinstance(read_as, User):
+        raise TypeError("{} is not a User, is a {}".format(read_as, type(read_as)))
+
+    if not secfs.access.can_read(read_as, i):
+        if i.p.is_group():
             raise PermissionError("cannot read from group-readable file {0} as {1}; user is not in group".format(i, read_as))
         else:
             raise PermissionError("cannot read from user-readable file {0} as {1}".format(i, read_as))
@@ -146,8 +165,13 @@ def write(write_as, i, off, buf):
     """
     Write writes the given bytes into the file at i at the given offset.
     """
-    if not secfs.access.can_write(write_as[0], i):
-        if i[0][1]:
+    if not isinstance(i, I):
+        raise TypeError("{} is not an I, is a {}".format(i, type(i)))
+    if not isinstance(write_as, User):
+        raise TypeError("{} is not a User, is a {}".format(write_as, type(write_as)))
+
+    if not secfs.access.can_write(write_as, i):
+        if i.p.is_group():
             raise PermissionError("cannot write to group-owned file {0} as {1}; user is not in group".format(i, write_as))
         else:
             raise PermissionError("cannot write to user-owned file {0} as {1}".format(i, write_as))
@@ -190,8 +214,14 @@ def link(link_as, i, parent_i, name):
     """
     Adds the given i into the given parent directory under the given name.
     """
-    if not secfs.access.can_write(link_as[0], parent_i):
-        if parent_i[0][1]:
+    if not isinstance(parent_i, I):
+        raise TypeError("{} is not an I, is a {}".format(parent_i, type(parent_i)))
+    if not isinstance(i, I):
+        raise TypeError("{} is not an I, is a {}".format(i, type(i)))
+    if not isinstance(link_as, User):
+        raise TypeError("{} is not a User, is a {}".format(link_as, type(link_as)))
+    if not secfs.access.can_write(link_as, parent_i):
+        if parent_i.p.is_group():
             raise PermissionError("cannot create in group-writeable directory {0} as {1}; user is not in group".format(parent_i, link_as))
         else:
             raise PermissionError("cannot create in user-writeable directory {0} as {1}".format(parent_i, link_as))

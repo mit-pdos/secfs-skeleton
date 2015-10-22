@@ -6,12 +6,16 @@ import secfs.crypto
 import secfs.tables
 import secfs.store.block
 from secfs.store.inode import Inode
+from secfs.types import I, Principal, User, Group
 
 def find_under(dir_i, name):
     """
     Attempts to find the i of the file or directory with the given name under
     the directory at i.
     """
+    if not isinstance(dir_i, I):
+        raise TypeError("{} is not an I, is a {}".format(dir_i, type(dir_i)))
+
     dr = Directory(dir_i)
     for f in dr.children:
         if f[0] == name:
@@ -24,6 +28,9 @@ class Directory:
     inodes. To load a directory, an i must be given.
     """
     def __init__(self, i):
+        if not isinstance(i, I):
+            raise TypeError("{} is not an I, is a {}".format(i, type(i)))
+
         self.inode = None
         self.children = []
 
@@ -43,6 +50,11 @@ def add(dir_i, name, i):
     Updates the directory's inode contents to include an entry for i under the
     given name.
     """
+    if not isinstance(dir_i, I):
+        raise TypeError("{} is not an I, is a {}".format(dir_i, type(dir_i)))
+    if not isinstance(i, I):
+        raise TypeError("{} is not an I, is a {}".format(i, type(i)))
+
     dr = Directory(dir_i)
     for f in dr.children:
         if f[0] == name:

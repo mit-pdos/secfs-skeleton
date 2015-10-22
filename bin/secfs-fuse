@@ -12,6 +12,7 @@ from llfuse import FUSEError
 import secfs.access
 import secfs.store
 import secfs.fs
+from secfs.types import I, Principal, User, Group
 
 # Welcome to the SecFS secure file system.
 # This is the main entry point for all FUSE file system operations.
@@ -42,8 +43,6 @@ import secfs.fs
 # used internally in SecFS. These should never be useful further down the stack
 # (for example, the server should never see such handles), and so they fit well
 # here.
-# NOTE: an "i" is a tuple containing (principal, inumber)
-# where principal is (uid/gid, F/T (for is_group))
 
 # rinodes maps i handles to inodes as exposed by FUSE
 rinodes = {
@@ -74,13 +73,16 @@ def new_fh(i, uid):
     i. The file handle will also be associated with the user principal with the
     given uid.
     """
+    if not isinstance(i, I):
+        raise TypeError("{} is not an I, is a {}".format(i, type(i)))
+
     global fhs
 
     fh = 0
     while fh in fhs:
         fh += 1
 
-    fhs[fh] = (i, (uid, False))
+    fhs[fh] = (i, User(uid))
     return fh
 
 # llfuse does not expose fuse_get_context, and so there are some file
@@ -171,15 +173,15 @@ class SecFS(llfuse.Operations):
             if m is None:
                 print("invalid private key file name {}".format(f))
                 continue
-            uid = int(m.group(1))
+            u = User(int(m.group(1)))
             if mounter is None:
-                mounter = uid
+                mounter = u
 
             import os.path
             if not os.path.exists(f):
-                secfs.crypto.generate_key(uid)
+                secfs.crypto.generate_key(u)
 
-            secfs.crypto.register_keyfile(uid, f)
+            secfs.crypto.register_keyfile(u, f)
 
         import Pyro4.util
         # get remote stack traces
@@ -202,7 +204,7 @@ class SecFS(llfuse.Operations):
 
             # generate root private key
             mpub = secfs.crypto.generate_key(mounter)
-            secfs.crypto.register_keyfile(mounter, 'user-{}-key.pem'.format(mounter))
+            secfs.crypto.register_keyfile(mounter, 'user-{}-key.pem'.format(mounter.id))
 
             # export root public key
             from cryptography.hazmat.primitives import serialization
@@ -217,14 +219,17 @@ class SecFS(llfuse.Operations):
             # initialize a new share, and tell the server about it. don't
             # refresh the user and group maps, as they have not yet been built.
             self._pre(mounter, False)
-            root = secfs.fs.init((mounter, False),
-                {uid: secfs.crypto.generate_key(uid) for uid in secfs.crypto.keys},
-                {100: [uid for uid in secfs.crypto.keys if uid != 666]}
+            root = secfs.fs.init(mounter,
+                {u: secfs.crypto.generate_key(u) for u in secfs.crypto.keys},
+                {Group(100): [u for u in secfs.crypto.keys if u.id != 666]}
             )
             self.server.create(self.share, root)
             self._post()
 
         print("root is at", root)
+        if isinstance(root, tuple):
+            # because the server doesn't know serialization of Is
+            root = I(User(root[0][0]), root[1])
 
         # map FUSE inode root to real SecFS root
         global rinodes
@@ -238,13 +243,13 @@ class SecFS(llfuse.Operations):
         with open(self.root_pubkey, 'rb') as f:
             pem = f.read()
             secfs.fs.root_i = root
-            secfs.fs.owner = root[0][0]
-            secfs.fs.usermap[root[0][0]] = load_pem_public_key(pem, backend=default_backend())
+            secfs.fs.owner = root.p
+            secfs.fs.usermap[root.p] = load_pem_public_key(pem, backend=default_backend())
 
         # Set up lastctx in case one of the non-context methods are called first
         global lastctx
         lastctx = llfuse.RequestContext()
-        lastctx.uid = mounter
+        lastctx.uid = mounter.id
         lastctx.gid = int(os.getegid())
         lastctx.umask = 0o022
 
@@ -260,7 +265,7 @@ class SecFS(llfuse.Operations):
         print("LOOKUP", inode_p, name)
 
         global lastctx
-        self._pre(lastctx.uid)
+        self._pre(User(lastctx.uid))
         i = secfs.store.tree.find_under(inodes[inode_p], name)
         if i == None:
             self._post()
@@ -272,14 +277,15 @@ class SecFS(llfuse.Operations):
         print("GETATTR", inode)
 
         global lastctx
-        self._pre(lastctx.uid)
+        self._pre(User(lastctx.uid))
+
         return self._post_and_getattr(inodes[inode])
 
     def opendir(self, inode):
         print("OPENDIR", inode)
 
         global lastctx
-        self._pre(lastctx.uid)
+        self._pre(User(lastctx.uid))
 
         i = inodes[inode]
         node = secfs.fs.get_inode(i)
@@ -293,7 +299,8 @@ class SecFS(llfuse.Operations):
     def readdir(self, fh, off):
         print("READDIR", fh, off)
 
-        self._pre(fhs[fh][1][0])
+        self._pre(fhs[fh][1])
+
         node = secfs.fs.get_inode(fhs[fh][0])
         if node.kind != 0:
             raise llfuse.FUSEError(errno.ENOTDIR)
@@ -308,7 +315,7 @@ class SecFS(llfuse.Operations):
         print("OPEN", inode, flags)
 
         global lastctx
-        self._pre(lastctx.uid)
+        self._pre(User(lastctx.uid))
 
         i = inodes[inode]
         node = secfs.fs.get_inode(i)
@@ -323,6 +330,7 @@ class SecFS(llfuse.Operations):
         print("ACCESS", inode, mode, ctx.uid, ctx.gid, ctx.umask)
         global lastctx
         lastctx = ctx
+        u = User(ctx.uid)
 
         i = inodes[inode]
 
@@ -330,15 +338,15 @@ class SecFS(llfuse.Operations):
             return secfs.tables.resolve(i) != None
 
         if (mode & os.R_OK) == os.R_OK:
-            if not secfs.access.can_read(ctx.uid, i):
+            if not secfs.access.can_read(u, i):
                 return False
 
         if (mode & os.W_OK) == os.W_OK:
-            if not secfs.access.can_write(ctx.uid, i):
+            if not secfs.access.can_write(u, i):
                 return False
 
         if (mode & os.X_OK) == os.X_OK:
-            if not secfs.access.can_execute(ctx.uid, i):
+            if not secfs.access.can_execute(u, i):
                 return False
 
         return True
@@ -348,7 +356,7 @@ class SecFS(llfuse.Operations):
 
         try:
             fh = fhs[fh]
-            self._pre(fh[1][0])
+            self._pre(fh[1])
             ret = secfs.fs.read(fh[1], fh[0], offset, length)
             self._post()
             return ret
@@ -366,12 +374,12 @@ class SecFS(llfuse.Operations):
         # Store ctx for the other methods that don't receive one
         global lastctx
         lastctx = ctx
-        self._pre(ctx.uid)
+        self._pre(User(ctx.uid))
 
-        who = (ctx.uid, False)
+        who = User(ctx.uid)
         if (ctx.umask & 0o200) != 0:
             # user gave up write permission, so donating to group
-            who = (ctx.gid, True)
+            who = Group(ctx.gid)
 
         encrypt = False
         if (ctx.umask & 0o004) != 0:
@@ -379,7 +387,7 @@ class SecFS(llfuse.Operations):
             encrypt = True
 
         try:
-            i = secfs.fs.mkdir(inodes[parent_inode], name, (ctx.uid, False), who)
+            i = secfs.fs.mkdir(inodes[parent_inode], name, User(ctx.uid), who)
             return self._post_and_getattr(i)
         except PermissionError as e:
             print("Illegal access:", e)
@@ -395,12 +403,12 @@ class SecFS(llfuse.Operations):
         # Store ctx for the other methods that don't receive one
         global lastctx
         lastctx = ctx
-        self._pre(ctx.uid)
+        self._pre(User(ctx.uid))
 
-        who = (ctx.uid, False)
+        who = User(ctx.uid)
         if (ctx.umask & 0o200) != 0:
             # user gave up write permission, so donating to group
-            who = (ctx.gid, True)
+            who = Group(ctx.gid)
 
         encrypt = False
         if (ctx.umask & 0o004) != 0:
@@ -408,7 +416,7 @@ class SecFS(llfuse.Operations):
             encrypt = True
 
         try:
-            i = secfs.fs.create(inodes[parent_inode], name, (ctx.uid, False), who)
+            i = secfs.fs.create(inodes[parent_inode], name, User(ctx.uid), who)
             ret = (new_fh(i, ctx.uid), _getattr(i))
             self._post()
             return ret
@@ -425,7 +433,7 @@ class SecFS(llfuse.Operations):
 
         try:
             fh = fhs[fh]
-            self._pre(fh[1][0])
+            self._pre(fh[1])
             ret = secfs.fs.write(fh[1], fh[0], off, buf)
             self._post()
             return ret
@@ -444,14 +452,14 @@ class SecFS(llfuse.Operations):
             raise llfuse.FUSEError(errno.ENOSYS)
 
         global lastctx
-        who = (lastctx.uid, False)
+        who = User(lastctx.uid)
 
-        self._pre(lastctx.uid)
+        self._pre(who)
         i = inodes[inode]
 
-        if not secfs.access.can_write(who[0], i):
+        if not secfs.access.can_write(who.id, i):
             self._post()
-            if i[0][1]:
+            if i.p.is_group():
                 print("cannot setattr on group-owned file {0} as {1}; user is not in group".format(i, who))
             else:
                 print("cannot setattr on user-owned file {0} as {1}".format(i, who))
@@ -594,17 +602,17 @@ def _getattr(i):
         entry.st_mode |= stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
 
         # Who can write (i.e. owned by group or user)?
-        if i[0][1]:
+        if i.p.is_group():
             # owned by group
             entry.st_mode |= stat.S_IWGRP
-            entry.st_gid = i[0][0]
+            entry.st_gid = i.p.id
 
             # who wrote last?
             real_i = secfs.tables.resolve(i, False)
-            entry.st_uid = real_i[0][0]
+            entry.st_uid = real_i.p.id
         else:
             entry.st_mode |= stat.S_IWUSR
-            entry.st_uid = i[0][0]
+            entry.st_uid = i.p.id
             entry.st_gid = 0
 
         # Who can execute? Those who can read if node.ex is True
