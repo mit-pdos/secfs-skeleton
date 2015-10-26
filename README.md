@@ -42,14 +42,79 @@ goal is to develop a file system that allows users to store data on a
 remote file server, without trusting that server, obviating many of
 these problems.
 
+## Hand-in procedure
+
+You will collaborate in groups of 2-3 to complete this lab.
+We provide each group a shared git repository; each member in
+a group can access the repository using his/her own API keys.
+You are free to push to the repository as many times as you want during
+the development.  After the lab deadline, we will grade the lab based on
+the latest commit in the repository's master branch that falls before
+the deadline.
+
+To access the repository, first register your group on the 
+[submission website](https://6858.csail.mit.edu).
+In the "Final Project" section, select an existing group 
+(or another group member if you come first), and then click "Join".
+**Note that the group assignment will freeze by November 13**.
+After that, you must ask the course staff to change your group.
+
+Your repository URL will show up on the submission site.
+It typically looks like this:
+
+```
+https://6858.csail.mit.edu/git/project/<Your-API-Key>`
+```
+
+Note that other members in your group will see different URLs that
+contain their own API key.  Both URLs will point to the same repository
+as long as you are in the same group.  **Do NOT** share your own
+repository URL (and thus your API key) with anybody else.
+
+One person in your group must initialize the group repository from our
+SecFS code skeleton:
+
+```
+$ git clone https://github.com/mit-pdos/secfs-skeleton.git secfs
+$ cd secfs
+$ git remote rename origin upstream
+$ git remote add origin https://6858.csail.mit.edu/git/project/<Your-API-Key>
+$ git push -u origin master
+```
+
+After that, other members can simply clone from the group repository:
+
+```
+$ git clone https://6858.csail.mit.edu/git/project/<Their-API-Key> secfs
+$ cd secfs
+$ git remote add upstream https://github.com/mit-pdos/secfs-skeleton.git
+```
+
+Validate that your remote repositories are correct:
+
+```
+$ git remote -v
+origin  https://6858.csail.mit.edu/git/project/<Your-API-Key> (fetch)
+origin  https://6858.csail.mit.edu/git/project/<Your-API-Key> (push)
+upstream    https://github.com/mit-pdos/secfs-skeleton.git (fetch)
+upstream    https://github.com/mit-pdos/secfs-skeleton.git (push)
+```
+
+Now all members in your group can use `git commit`, `git push` 
+and `git pull` to collaborate.  If you log in to the submission site,
+it will show recent pushed commits made by all your group members.
+
+If you reset your API key on the submission site, you must update the
+remote repository URL as well:
+
+```
+$ git remote set-url origin https://6858.csail.mit.edu/git/project/<New-API-Key>
+```
+
+If you are working on the project on your own, follow the same
+instructions as above, but skip the step that asks you to join a group.
+
 ## Getting set up
-
-First, you should get a copy of the SecFS source code:
-
-```
-git clone https://github.com/mit-pdos/secfs-skeleton.git secfs
-cd secfs
-```
 
 In the root of the lab directory, you will find a number of files:
 
