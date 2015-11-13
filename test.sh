@@ -68,14 +68,15 @@ client() {
 }
 client_cleanup() {
 	sudo umount "$mntat" 2>/dev/null
-	sleep .2 # give it time to unmount cleanly
-	sudo kill $fuse 2>/dev/null
+	sleep 1 # give it time to unmount cleanly
+	sudo kill -9 $fuse 2>/dev/null
 	wait $fuse 2>/dev/null
 	if [ $? -ne 0 ]; then
 		printf "${INFO}: $nxt_fname died\n" "$uri"
 	else
 		printf "${INFO}: $nxt_fname exited cleanly\n" "$uri"
 	fi
+	sudo umount "$mntat" 2>/dev/null
 
 	# make server release global lock just in case
 	# this may be needed even if the client excited with exit=0!

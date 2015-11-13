@@ -457,7 +457,7 @@ class SecFS(llfuse.Operations):
         self._pre(who)
         i = inodes[inode]
 
-        if not secfs.access.can_write(who.id, i):
+        if not secfs.access.can_write(who, i):
             self._post()
             if i.p.is_group():
                 print("cannot setattr on group-owned file {0} as {1}; user is not in group".format(i, who))
