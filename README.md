@@ -395,8 +395,7 @@ explore the file system.
 You may want to first get the list working, and only afterwards add
 cryptographic signing and verification of the VSes. You should consider
 implementing your cryptographic operations in `secfs/crypto.py`. Public
-keys for users are available in `secfs.fs.usermap` (key is UNIX user
-ID).
+keys for users are available in `secfs.fs.usermap` (key is a `User`).
 
 When you can read files in the file system using a second client, try to
 create a few file (as root) in one client, and verify that this file
