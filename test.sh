@@ -530,7 +530,7 @@ client "root.pub" "user-$(id -u)-key.pem"
 (try "echo be-afraid | tee -a shared/user-file")
 popc
 mv -f "good-user.pem" "user-$(id -u)-key.pem"
-cant "successfully read file modified by malicious user" "cat shared/user-file"
+cant "successfully read file modified by malicious user" "grep be-afraid shared/user-file"
 
 cleanup
 
