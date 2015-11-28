@@ -373,13 +373,13 @@ the mounted file system, an error is given:
 
 This happens because the second client does not have access to the
 file system's `i`-tables, since these are (currently) only stored in
-the memory of the first client. In SUNDR, these `i`-tables are not
-persisted directly; instead, the clients construct, upload, and download
-Version Structures (or VSes) that describe *changes* to the file system.
-These are downloaded from the server, verified, and then used to
-reconstruct the `i`-tables locally. When the file system is changed, a
-new, signed VS is uploaded to the server, so that other clients can see
-the change.
+the memory of the first client. In SUNDR, these `i`-tables are persisted
+on the server, and changes to the `i`-tables of users and groups are
+announced through Version Structures (or VSes) that describe *changes*
+to the file system. These are downloaded from the server, verified, and
+then used to verify downloaded `i`-tables locally. When the file system
+is changed, a new, signed VS is uploaded to the server, so that other
+clients can see the change.
 
 Specifically, your goal for the first exercise is to be able to start a
 second SecFS client (see "Interacting with the file system") on a
