@@ -314,6 +314,8 @@ expect() {
 }
 
 server_mem() {
+	tests="$(echo $tests+1 | bc -l)"
+
 	type="$1"
 	string="$2"
 	o=$(printf "${DOTS}: ensure $type file data not in server memory\r")
@@ -327,6 +329,7 @@ server_mem() {
 		printf "%${lastlen}s\r${FAIL}: found $type file data in server memory\n" " "
 	else
 		printf "%${lastlen}s\r${PASS}: $type file data not in server memory\n" " "
+		passed="$(echo $passed+1 | bc -l)"
 	fi
 }
 
