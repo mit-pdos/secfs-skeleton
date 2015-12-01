@@ -112,19 +112,27 @@ section "Restricted read permissions"
 # Encrypted files (no read permission)
 expect "sudo sh -c 'umask 0004; echo supercalifragilisticexpialidocious > root-secret'" '^$' || fail "couldn't create user-readable file as user"
 expect "sudo cat root-secret" '^supercalifragilisticexpialidocious$' || fail "couldn't read user-readable file as user"
-server_mem "user-readable" "supercalifragilisticexpialidocious"
+server_mem "user-readable file" "supercalifragilisticexpialidocious"
 fstats "root-secret" "uid=root" "perm=-rw-------" || fail "encrypted file has incorrect permissions"
 cant "read encrypted file belonging to other user" "cat root-secret"
 expect "echo y | sudo tee -a root-secret" "sudo cat root-secret" '^supercalifragilisticexpialidocious\ny$' || fail "failed to append to encrypted file"
 
 # Encrypted shared files (no read permission)
 expect "sudo sh -c 'umask 0204; echo dociousaliexpilisticfragicalirupes | sg users \"tee group-secret\"'" '^dociousaliexpilisticfragicalirupes$' || fail "couldn't create group-readable file as root"
-server_mem "group-readable" "dociousaliexpilisticfragicalirupes"
+server_mem "group-readable file" "dociousaliexpilisticfragicalirupes"
 fstats "group-secret" "uid=root" "gid=users" "perm=-r--rw----" || fail "group encrypted file has incorrect permissions"
 expect "cat group-secret" '^dociousaliexpilisticfragicalirupes$' || fail "couldn't read group-readable file as group member"
 expect "sudo cat group-secret" '^dociousaliexpilisticfragicalirupes$' || fail "couldn't read group-readable file as non-owning group member"
 expect "echo z | sudo tee -a group-secret" "sudo cat group-secret" '^dociousaliexpilisticfragicalirupes\nz$' || fail "failed to append to group encrypted file"
 cant "read encrypted file belonging to group without being member" "sudo -u '#666' cat root-secret"
+
+# Encrypted directories
+expect "sudo sh -c 'umask 0004; mkdir root-secrets'" '^$' || fail "couldn't create user-readable directory as user"
+expect "echo a | sudo tee root-secrets/hidden-filename" "sudo cat root-secrets/hidden-filename" '^a$' || fail "couldn't read back root created file in encrypted directory"
+expect "echo a | sudo tee -a root-secrets/hidden-filename" "sudo cat root-secrets/hidden-filename" '^a\na$' || fail "couldn't read back root appended file in encrypted directory"
+server_mem "user-readable directory" "hidden-filename"
+cant "read encrypted directory belonging to other user" "ls root-secrets"
+cant "create file in encrypted directory belonging to other user" "touch root-secrets/sneaky-file"
 
 
 section "Read-only client with root key access"

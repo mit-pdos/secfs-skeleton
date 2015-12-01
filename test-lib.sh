@@ -343,9 +343,9 @@ server_mem() {
 	local ex=$?
 	rm -f "core.$server"
 	if [ $ex -eq 0 ]; then
-		printf "%${lastlen}s\r${FAIL}: found $type file data in server memory\n" " "
+		printf "%${lastlen}s\r${FAIL}: found $type data in server memory\n" " "
 	else
-		printf "%${lastlen}s\r${PASS}: $type file data not in server memory\n" " "
+		printf "%${lastlen}s\r${PASS}: $type data not in server memory\n" " "
 		passed="$(echo "$passed+1" | bc -l)"
 	fi
 }
