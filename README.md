@@ -450,7 +450,7 @@ group (group 100).
 To exemplify, you will want to test some commands long the lines of:
 ```shell
 # client 1
-sudo sh -c 'umask 0200; sg users \"mkdir mnt/shared\"'
+sudo sh -c 'umask 0200; sg users "mkdir mnt/shared"'
 ls -la shared # should print uid=root, gid=users, permissions=dr-xrwxr-x
 
 # client 2
@@ -463,11 +463,14 @@ additional shared directories, which root should be able to manipulate.
 
 ### Exercise 3: Read-permissions
 
-For this lab, we also require that you implement read-permission. In
+For this lab, we also require that you implement read-permissions. In
 particular, if a user specifies that a file is read-protected, its
 contents should be hidden from the server, as well as from any other
 user not named in the ACL (i.e. that is not the user who created it, or
-that is not in the group the creator shared the file with).
+that is not in the group the creator shared the file with). Note that it
+is *not* sufficient to simply check the permission bits on the file; a
+malicious client or server should not be *able* to see the file or
+directory contents, even if they bypass all the permission checks.
 
 Similarly to how we implement group-permissions, we also hijack umask to
 allow users to express that they do not wish a file to be
