@@ -45,7 +45,6 @@ def init(owner, users, groups):
     node = Inode()
     node.kind = 0
     node.ex = True
-    node.owner = owner
     node.ctime = time.time()
     node.mtime = node.ctime
 
