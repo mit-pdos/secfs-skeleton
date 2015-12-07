@@ -163,6 +163,7 @@ try() {
 		echo "$shcmd" | grep 'sudo -u' > /dev/null
 		if [ $? -eq 0 ]; then
 			user="$(echo "$shcmd" | sed 's/.*sudo -u \([^ ]\+\).*/\1/')"
+			user="$(echo "$user" | sed "s/'//g")"
 			sudo -u "$user" mknod x p 2>/dev/null
 		else
 			sudo mknod x p 2>/dev/null

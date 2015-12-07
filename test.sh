@@ -124,7 +124,7 @@ fstats "group-secret" "uid=root" "gid=users" "perm=-r--rw----" || fail "group en
 expect "cat group-secret" '^dociousaliexpilisticfragicalirupes$' || fail "couldn't read group-readable file as group member"
 expect "sudo cat group-secret" '^dociousaliexpilisticfragicalirupes$' || fail "couldn't read group-readable file as non-owning group member"
 expect "echo z | sudo tee -a group-secret" "sudo cat group-secret" '^dociousaliexpilisticfragicalirupes\nz$' || fail "failed to append to group encrypted file"
-cant "read encrypted file belonging to group without being member" "sudo -u '#666' cat root-secret"
+cant "read encrypted file belonging to group without being member" "sudo -u '#666' cat group-secret"
 
 # Encrypted directories
 expect "sudo sh -c 'umask 0004; mkdir root-secrets'" '^$' || fail "couldn't create user-readable directory as user"
