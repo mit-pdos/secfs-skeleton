@@ -85,14 +85,6 @@ def new_fh(i, uid):
     fhs[fh] = (i, User(uid))
     return fh
 
-# llfuse does not expose fuse_get_context, and so there are some file
-# operations that we do not know which user is performing. This has been
-# reported upstream: https://bitbucket.org/nikratio/python-llfuse/issues/59/add-api-function-to-get-current-context
-# lastctx caches the context from previous file operations, which will give us
-# an (often incorrect) estimate of which user is performing an action.
-# Fixed in https://bitbucket.org/nikratio/python-llfuse/commits/3c069cf8efbf (currently unreleased)
-lastctx = None
-
 class SecFS(llfuse.Operations):
     """
     This class represents a single SecFS client, and implements a number of
@@ -246,13 +238,6 @@ class SecFS(llfuse.Operations):
             secfs.fs.owner = root.p
             secfs.fs.usermap[root.p] = load_pem_public_key(pem, backend=default_backend())
 
-        # Set up lastctx in case one of the non-context methods are called first
-        global lastctx
-        lastctx = llfuse.RequestContext()
-        lastctx.uid = mounter.id
-        lastctx.gid = int(os.getegid())
-        lastctx.umask = 0o022
-
         self._pre(mounter)
         self._post(False)
 
@@ -261,11 +246,10 @@ class SecFS(llfuse.Operations):
     ## See https://pythonhosted.org/llfuse/operations.html
     ## and http://fuse.sourceforge.net/doxygen/structfuse__operations.html
 
-    def lookup(self, inode_p, name):
+    def lookup(self, inode_p, name, ctx):
         print("LOOKUP", inode_p, name)
 
-        global lastctx
-        self._pre(User(lastctx.uid))
+        self._pre(User(ctx.uid))
         i = secfs.store.tree.find_under(inodes[inode_p], name)
         if i == None:
             self._post()
@@ -273,26 +257,23 @@ class SecFS(llfuse.Operations):
 
         return self._post_and_getattr(i)
 
-    def getattr(self, inode):
+    def getattr(self, inode, ctx):
         print("GETATTR", inode)
 
-        global lastctx
-        self._pre(User(lastctx.uid))
-
+        self._pre(User(ctx.uid))
         return self._post_and_getattr(inodes[inode])
 
-    def opendir(self, inode):
+    def opendir(self, inode, ctx):
         print("OPENDIR", inode)
 
-        global lastctx
-        self._pre(User(lastctx.uid))
+        self._pre(User(ctx.uid))
 
         i = inodes[inode]
         node = secfs.fs.get_inode(i)
         if node.kind != 0:
             raise llfuse.FUSEError(errno.ENOTDIR)
 
-        ret = new_fh(i, lastctx.uid)
+        ret = new_fh(i, ctx.uid)
         self._post()
         return ret
 
@@ -311,25 +292,22 @@ class SecFS(llfuse.Operations):
 
         self._post()
 
-    def open(self, inode, flags):
+    def open(self, inode, flags, ctx):
         print("OPEN", inode, flags)
 
-        global lastctx
-        self._pre(User(lastctx.uid))
+        self._pre(User(ctx.uid))
 
         i = inodes[inode]
         node = secfs.fs.get_inode(i)
         if node.kind != 1:
             raise llfuse.FUSEError(errno.EISDIR)
 
-        ret = new_fh(i, lastctx.uid)
+        ret = new_fh(i, ctx.uid)
         self._post()
         return ret
 
     def access(self, inode, mode, ctx):
         print("ACCESS", inode, mode, ctx.uid, ctx.gid, ctx.umask)
-        global lastctx
-        lastctx = ctx
         u = User(ctx.uid)
 
         i = inodes[inode]
@@ -371,9 +349,6 @@ class SecFS(llfuse.Operations):
     def mkdir(self, parent_inode, name, mode, ctx):
         print("MKDIR", parent_inode, name, mode, ctx)
 
-        # Store ctx for the other methods that don't receive one
-        global lastctx
-        lastctx = ctx
         self._pre(User(ctx.uid))
 
         who = User(ctx.uid)
@@ -400,9 +375,6 @@ class SecFS(llfuse.Operations):
     def create(self, parent_inode, name, mode, flags, ctx):
         print("CREATE", parent_inode, name, mode, flags, ctx)
 
-        # Store ctx for the other methods that don't receive one
-        global lastctx
-        lastctx = ctx
         self._pre(User(ctx.uid))
 
         who = User(ctx.uid)
@@ -445,14 +417,13 @@ class SecFS(llfuse.Operations):
             self._post()
             raise
 
-    def setattr(self, inode, attr):
-        if attr.st_uid is not None:
+    def setattr(self, inode, attr, fields, fh, ctx):
+        if fields.update_uid:
             raise llfuse.FUSEError(errno.ENOSYS)
-        if attr.st_gid is not None:
+        if fields.update_gid:
             raise llfuse.FUSEError(errno.ENOSYS)
 
-        global lastctx
-        who = User(lastctx.uid)
+        who = User(ctx.uid)
 
         self._pre(who)
         i = inodes[inode]
@@ -466,10 +437,10 @@ class SecFS(llfuse.Operations):
             raise llfuse.FUSEError(errno.EACCES)
 
         node = secfs.fs.get_inode(i)
-        if attr.st_mode is not None:
+        if fields.update_mode:
             node.ex = (attr.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)) != 0
             # TODO: warn if trying to change other bits -- has no effect.
-        if attr.st_size is not None:
+        if fields.update_size:
             if attr.st_size == 0:
                 node.blocks = []
                 node.size = 0
@@ -479,13 +450,13 @@ class SecFS(llfuse.Operations):
                 # re-encrypt. Meh.
                 self._post()
                 raise llfuse.FUSEError(errno.ENOSYS)
-        if attr.st_mtime is not None:
-            node.mtime = attr.st_mtime
+        if fields.update_mtime is not None:
+            node.mtime = attr.st_mtime_ns
 
         # metadata changed, so update change time
         node.ctime = time.time()
 
-        # NOTE: we ignore attr.st_atime as we do not store access times. we
+        # NOTE: we ignore attr.st_atime_ns as we do not store access times. we
         # don't want to return an error though, because this would be reported
         # as failure by touch et. al.
 
@@ -493,42 +464,6 @@ class SecFS(llfuse.Operations):
         new_hash = secfs.store.block.store(node.bytes())
         secfs.tables.modmap(who, i, new_hash)
         return self._post_and_getattr(i)
-
-    def mknod(self, parent_inode, name, mode, rdev, ctx):
-        # This is a bit of a hack, and deserves some explanation.
-        # llfuse does not give us a FUSE context for open() and opendir(),
-        # which leads us to guess which user is trying to do the open (this is
-        # what lastctx is used for). A ticket has been opened, and a fix is
-        # scheduled, but the lab had to be posted before a fix was released:
-        #
-        #   https://bitbucket.org/nikratio/python-llfuse/issues/59/add-api-function-to-get-current-context
-        #
-        # Replicating the issue can be done easily enough by:
-        #
-        #    $ sudo bash -c 'umask 0200; sg users "echo x > mnt/shared"; umask 0022'
-        #    $ ls -l mnt/shared
-        #    -r--rw-r-- 1 root users   2 Sep 17 15:03 shared
-        #    $ id
-        #    uid=1000(jon) gid=100(users)
-        #    $ echo x | sudo tee -a mnt/shared
-        #    $ ls -l mnt/shared
-        #    -r--rw-r-- 1 jon  users   4 Sep 17 15:03 shared
-        #
-        # This happens because the user of the last operation prior to the open
-        # is assumed to have issued the open. However, this is not the case
-        # above. The previous operation was the ls by user 1000, so they are
-        # assumed to be making the edit. In this case, no error is given
-        # because user 1000 is in the group users, but if they weren't, a
-        # permission denied error would be printed.
-        #
-        # Hijacking mknod is a hack that is used by test.sh to give the file
-        # system correct information about who is performing a particular open
-        # or opendir call. The call will fail, but the information about which
-        # user called it will be stored, and then re-used by open and opendir
-        # later.
-        global lastctx
-        lastctx = ctx
-        raise llfuse.FUSEError(errno.ENOSYS)
 
 
 def _reload_principals():
@@ -574,8 +509,8 @@ def _getattr(i):
     # Fill entry with known attributes
     entry = llfuse.EntryAttributes()
     entry.st_ino = rinodes[i]
-    entry.st_mtime = n.mtime
-    entry.st_ctime = n.ctime
+    entry.st_mtime_ns = n.mtime
+    entry.st_ctime_ns = n.ctime
     entry.st_size = n.size
 
     # Unused attributes
@@ -585,7 +520,7 @@ def _getattr(i):
     entry.generation = 0
     entry.st_blocks = 1
     entry.st_nlink = 1
-    entry.st_atime = 0
+    entry.st_atime_ns = 0
     entry.st_rdev = 0
 
     # Mode gets complicated
@@ -670,7 +605,7 @@ if __name__ == '__main__':
         print("ready")
         sys.stdout.flush()
 
-        llfuse.main(single=True)
+        llfuse.main(workers=1)
     except:
         llfuse.close(unmount=False)
         raise

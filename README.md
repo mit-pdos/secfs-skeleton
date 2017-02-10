@@ -598,14 +598,3 @@ way: clients will check that the `i`-table for the root `i` is signed by
 the user whose public the client is given when mounting, and the public
 keys of other users will be read from the directory entry `.users`
 inside the inode with handle `i`.
-
-## Known issues
-
- - Python's FUSE bindings do not expose information about what user
-   issued certain file operations (open in particular). This means most
-   tests that create a file as root and then try to modify (in the case
-   of write-protected) or read (in the case of read-protected) that
-   file, will fail. This has been [reported
-   upstream](https://bitbucket.org/nikratio/python-llfuse/issues/59/add-api-function-to-get-current-context),
-   but has not yet been fixed. The test script works around this by
-   hijacking the mknod operation to force storing a particular context.
