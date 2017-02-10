@@ -13,456 +13,189 @@ rm -rf secfs-test.* 2>/dev/null
 # in case students have changed it
 umask 0022
 
-rundir=$(mktemp -d secfs-test.XXXXXXXXXX)
-mntat="$rundir/mnt"
-mkdir "$mntat"
-uxsock="$rundir/sock"
-
 # Build and enable
 # shellcheck disable=SC1091
 . venv/bin/activate
 pip3 install --upgrade -e . > pip.log
 
+# shellcheck source=test-lib.sh
+. "$base/test-lib.sh"
+
+# start a clean server for testing
+info "starting server"
 env PYTHONUNBUFFERED=1 venv/bin/secfs-server "$uxsock" > server.log 2> server.err &
 server=$!
+
+# wait for server to start and announce its URI
 sync
 while ! grep -P "^uri =" server.log > /dev/null; do
 	sleep .2
 done
 uri=$(grep "uri = PYRO:secfs" server.log | awk '{print $3}')
 
-# colors from http://stackoverflow.com/questions/4332478/read-the-current-text-color-in-a-xterm/4332530#4332530
-RED=$(tput setaf 1)
-GREEN=$(tput setaf 2)
-BLUE=$(tput setaf 4)
-YELLOW=$(tput setaf 3)
-NORMAL=$(tput sgr0)
-
-INFO="[ ${BLUE}INFO${NORMAL} ]"
-PASS="[ ${GREEN}PASS${NORMAL} ]"
-FAIL="[ ${RED}FAIL${NORMAL} ]"
-OHNO="[ ${RED}OHNO${NORMAL} ]"
-DOTS="[ ${YELLOW}....${NORMAL} ]"
-WARN="[ ${YELLOW}INFO${NORMAL} ]"
-printf "${INFO}: connecting to server at %s\n" "$uri"
-
-fuse=0
-nxt_fname="primary-client"
-client() {
-	rm -f "$nxt_fname.log" 2>/dev/null
-	if [ $# -eq 0 ]; then
-		sudo PYTHONUNBUFFERED=1 venv/bin/secfs-fuse "$uri" "$mntat" "root.pub" "user-0-key.pem" "user-$(id -u)-key.pem" "user-666-key.pem" > "$nxt_fname.log" 2> "$nxt_fname.err" &
-		fuse=$!
-	else
-		sudo PYTHONUNBUFFERED=1 venv/bin/secfs-fuse "$uri" "$mntat" "$@" > "$nxt_fname.log" 2> "$nxt_fname.err" &
-		fuse=$!
-	fi
-	printf "${INFO}: client started; waiting for init\n" "$uri"
-
-	sync
-	while ! grep -P "^ready$" "$nxt_fname.log" > /dev/null; do
-		sleep .2
-	done
-
-	printf "${INFO}: client ready; continuing with tests\n" "$uri"
-}
-client_cleanup() {
-	sudo umount "$mntat" 2>/dev/null
-	sleep 1 # give it time to unmount cleanly
-	sudo kill -9 $fuse 2>/dev/null
-	wait $fuse 2>/dev/null
-	if [ $? -ne 0 ]; then
-		printf "${INFO}: $nxt_fname died\n" "$uri"
-	else
-		printf "${INFO}: $nxt_fname exited cleanly\n" "$uri"
-	fi
-	sudo umount "$mntat" 2>/dev/null
-
-	# make server release global lock just in case
-	# this may be needed even if the client excited with exit=0!
-	printf "${INFO}: making server release lock\n" "$uri"
-	kill -USR1 "$server"
-}
-_mntat=""
-_fuse=""
-pushc() {
-	_mntat="$mntat"
-	_fuse=$fuse
-	mntat="$rundir/mnt-$1"
-	if [ ! -d "$mntat" ]; then
-		mkdir "$mntat"
-	fi
-	nxt_fname="$1"
-}
-popc() {
-	client_cleanup
-
-	# Restore old client parameters
-	nxt_fname="primary-client"
-	mntat="$_mntat"
-	fuse=$_fuse
-	_mntat=''
-	_fuse=''
-}
-
-cleanup() {
-	if [ -n "$1" ]; then
-		printf "${OHNO}: Server or client died!\n" >/dev/stderr
-	fi
-
-	if [ -n "$_fuse" ]; then
-		# clean nested instance
-		popc
-	fi
-	client_cleanup
-	kill $server 2>/dev/null
-	wait $server 2>/dev/null
-
-	rm -rf "$rundir"
-
-	if [ -n "$1" ]; then
-		printf "${WARN}: partial test completion (passed %d/%d -- %.1f%%); cleaning up\n" "$passed" "$tests" "$(echo 100*$passed/$tests | bc -l)"
-	fi
-}
-
-tests=0
-passed=0
-
-section() {
-	printf "\n${INFO}: Entering section %s\n" "$1"
-}
-
-try() {
-	if ! sudo kill -0 $fuse 2> /dev/null; then
-		if [ -z "$_fuse" ]; then
-			# Primary client died. Game over.
-			return 255
-		else
-			# Non-primary client died, but there may be other tests we can do
-			return 254
-		fi
-
-	fi
-
-	shcmd="$1"
-	cd "$mntat" 2>/dev/null
-	ex=$?
-	if [ $ex -ne 0 ]; then
-		echo "could not enter mountpoint; got no such file or directory"
-		return $ex
-	fi
-
-	# work around llfuse context bug
-	echo "$shcmd" | grep 'sudo ' > /dev/null
-	if [ $? -eq 0 ]; then
-		sudo mknod x p 2>/dev/null
-	else
-		mknod x p 2>/dev/null
-	fi
-	sh -c "$shcmd" 2>&1
-	ex=$?
-
-	if ! sudo kill -0 $server 2> /dev/null; then
-		return 255
-	fi
-	if ! sudo kill -0 $fuse 2> /dev/null; then
-		if [ -z "$_fuse" ]; then
-			# Primary client died. Game over.
-			return 255
-		fi
-	fi
-
-	return $ex
-}
-
-fstats() {
-	tests="$(echo $tests+1 | bc -l)"
-
-	file="$1"; shift
-
-	o=$(printf "${DOTS}: testing permissions on file %s\r" "$file")
-	lastlen=${#o}
-	printf "%s" "$o"
-	stats=$(try "stat -c '%A %U %G' '$file'")
-	e=$?
-	if [ $e -ne 0 ]; then
-		if [ $e -eq 255 ]; then
-			printf "\n"
-			cleanup 1
-			exit 1
-		fi
-		printf "\n%s\n" "$stats"
-		return 1
-	fi
-
-	output=""
-	while [ $# -ne 0 ]; do
-		f=$(echo "$1" | awk -F= '{print $1}')
-		v=$(echo "$1" | awk -F= '{print $2}')
-		shift
-
-		printf "%${lastlen}s\r" " " # clear previous message
-		o=$(printf "${DOTS}: test %s of %s = %s\r" "$f" "$file" "$v")
-		lastlen=${#o}
-		printf "%s" "$o"
-
-		real_v=""
-		case $f in
-			perm) real_v="$(echo "$stats" | awk '{print $1}')" ;;
-			uid) real_v="$(echo "$stats" | awk '{print $2}')" ;;
-			gid) real_v="$(echo "$stats" | awk '{print $3}')" ;;
-		esac
-
-		if [ "$real_v" != "$v" ]; then
-			printf "\n%s != %s (was %s)\n" "$f" "$v" "$real_v"
-			return 1
-		fi
-	done
-	printf "%${lastlen}s\r" " " # clear previous message
-	printf "${PASS}: correct permissions on %s\n" "$file"
-	passed="$(echo $passed+1 | bc -l)"
-	return 0
-}
-
-cant() {
-	tests="$(echo $tests+1 | bc -l)"
-
-	name="$1"
-	shift
-
-	output=""
-	lastlen=0
-	while [ $# -ne 0 ]; do
-		shcmd="$1"
-		shift
-
-		printf "%${lastlen}s\r" " " # clear previous message
-		o=$(printf "${DOTS}: ensure failure of %s\r" "$shcmd")
-		lastlen=${#o}
-		printf "%s" "$o"
-
-		output=$(try "$shcmd")
-		e=$?
-		if [ $e -eq 0 ] || [ $e -eq 255 ]; then
-			printf "%${lastlen}s\r" " " # clear previous message
-			printf "%s\n${FAIL}: could %s\n" "$output" "$name"
-			if [ $e -eq 255 ]; then
-				cleanup 1
-				exit 1
-			fi
-			return 1
-		fi
-	done
-
-	printf "%${lastlen}s\r" " " # clear previous message
-	printf "${PASS}: can't %s\n" "$name"
-	passed="$(echo $passed+1 | bc -l)"
-	return 0
-}
-
-expect() {
-	tests="$(echo $tests+1 | bc -l)"
-
-	output=""
-	lastlen=0
-	cmds=""
-	while [ $# -ne 1 ]; do
-		shcmd="$1"
-		shift
-
-		if [ -z "$cmds" ]; then
-			cmds="$shcmd"
-		else
-			cmds="${cmds}; ${shcmd}"
-		fi
-
-		printf "%${lastlen}s\r" " " # clear previous message
-		o=$(printf "${DOTS}: test %s\r" "$shcmd")
-		lastlen=${#o}
-		printf "%s" "$o"
-
-		output=$(try "$shcmd")
-		e=$?
-		if [ $e -ne 0 ]; then
-			if [ $e -eq 255 ]; then
-				printf "\n"
-				cleanup 1
-				exit 1
-			fi
-			printf "\n%s\n" "$output"
-			return 1
-		fi
-	done
-
-	patt="$1"
-	if [ "$patt" = '^$' ]; then
-		echo "$output" | pcregrep -Mv "." > /dev/null
-		ex=$?
-	else
-		echo "$output" | pcregrep -M "$patt" > /dev/null
-		ex=$?
-	fi
-	if [ $ex -eq 0 ]; then
-		printf "%${lastlen}s\r" " " # clear previous message
-		printf "${PASS}: (%s) | grep '%s'\n" "$cmds" "$patt"
-		passed="$(echo $passed+1 | bc -l)"
-		return 0
-	else
-		printf "\n%s\n" "$output"
-		return 1
-	fi
-}
-
-server_mem() {
-	tests="$(echo $tests+1 | bc -l)"
-
-	type="$1"
-	string="$2"
-	o=$(printf "${DOTS}: ensure $type file data not in server memory\r")
-	lastlen=${#o}
-	printf "%s" "$o"
-	sudo gcore $server 2>/dev/null >/dev/null
-	grep -lia "$string" "core.$server" >/dev/null
-	ex=$?
-	rm -f "core.$server"
-	if [ $ex -eq 0 ]; then
-		printf "%${lastlen}s\r${FAIL}: found $type file data in server memory\n" " "
-	else
-		printf "%${lastlen}s\r${PASS}: $type file data not in server memory\n" " "
-		passed="$(echo $passed+1 | bc -l)"
-	fi
-}
-
-# start client with fresh keys
+# start primary client and connect it to the server
+info "connecting to server at %s" "$uri"
 sudo rm -f root.pub user-*-key.pem
 client
 
 
 section "Initializtion"
-expect "ls -la" ' *\.\/?$' || printf "${FAIL}: root directory does not contain .\n"
-expect "ls -la" ' *\.\.\/?$' || printf "${FAIL}: root directory does not contain ..\n"
-expect "ls -la" ' *\.users$' || printf "${FAIL}: root directory does not contain .users\n"
-expect "ls -la" ' *\.groups$' || printf "${FAIL}: root directory does not contain .groups\n"
-fstats "." "uid=root" "perm=drwxr-xr-x" || printf "${FAIL}: root directory . has incorrect permissions\n"
-fstats ".users" "uid=root" "perm=-rw-r--r--" || printf "${FAIL}: /.users has incorrect permissions\n"
-fstats ".groups" "uid=root" "perm=-rw-r--r--" || printf "${FAIL}: /.groups has incorrect permissions\n"
-expect "cat .users" '.+' || printf "${FAIL}: .users couldn't be read\n"
-expect "cat .groups" '.+' || printf "${FAIL}: .groups couldn't be read\n"
+expect "ls -la" ' *\.\/?$' || fail "root directory does not contain ."
+expect "ls -la" ' *\.\.\/?$' || fail "root directory does not contain .."
+expect "ls -la" ' *\.users$' || fail "root directory does not contain .users"
+expect "ls -la" ' *\.groups$' || fail "root directory does not contain .groups"
+fstats "." "uid=root" "perm=drwxr-xr-x" || fail "root directory . has incorrect permissions"
+fstats ".users" "uid=root" "perm=-rw-r--r--" || fail "/.users has incorrect permissions"
+fstats ".groups" "uid=root" "perm=-rw-r--r--" || fail "/.groups has incorrect permissions"
+expect "cat .users" '.+' || fail ".users couldn't be read"
+expect "cat .groups" '.+' || fail ".groups couldn't be read"
 
 
 section "Manipulating the root directory"
 # root single-user write
-expect "echo x | sudo tee root-file" "sudo cat root-file" '^x$' || printf "${FAIL}: couldn't read back root created file\n"
-expect "echo x | sudo tee -a root-file" "sudo cat root-file" '^x\nx$' || printf "${FAIL}: couldn't read back root appended file\n"
+expect "echo x | sudo tee root-file" "sudo cat root-file" '^x$' || fail "couldn't read back root created file"
+expect "echo x | sudo tee -a root-file" "sudo cat root-file" '^x\nx$' || fail "couldn't read back root appended file"
 
 cant "create user file in root dir" "echo b | tee user-file" "cat user-file"
 cant "append to root file as user" "echo b | tee -a root-file" "pcregrep -M '^x\nb$ root-file"
 cant "make user directory in root dir" "mkdir user-only" "stat user-only"
-fstats "root-file" "uid=root" "perm=-rw-r--r--" || printf "${FAIL}: new root file has incorrect permissions\n"
+fstats "root-file" "uid=root" "perm=-rw-r--r--" || fail "new root file has incorrect permissions"
 
 # root single-user dir
-expect "sudo mkdir root-only" '^$' || printf "${FAIL}: couldn't make root directory\n"
-expect "sudo ls -la root-only" ' *\.\/?$' || printf "${FAIL}: new root directories don't have .\n"
-expect "sudo ls -la root-only" ' *\.\.\/?$' || printf "${FAIL}: new root directories don't have ..\n"
-expect "sudo ls -la root-only/.." ' *\.users$' || printf "${FAIL}: new root directory .. doesn't point to root\n"
-expect "echo a | sudo tee root-only/file" "sudo cat root-only/file" '^a$' || printf "${FAIL}: couldn't read back root created file in directory\n"
-expect "echo a | sudo tee -a root-only/file" "sudo cat root-only/file" '^a\na$' || printf "${FAIL}: couldn't read back root appended file in directory\n"
-expect "sudo ls -la root-only/." ' *file$' || printf "${FAIL}: new root directory . does not point to self\n"
+expect "sudo mkdir root-only" '^$' || fail "couldn't make root directory"
+expect "sudo ls -la root-only" ' *\.\/?$' || fail "new root directories don't have ."
+expect "sudo ls -la root-only" ' *\.\.\/?$' || fail "new root directories don't have .."
+expect "sudo ls -la root-only/.." ' *\.users$' || fail "new root directory .. doesn't point to root"
+expect "echo a | sudo tee root-only/file" "sudo cat root-only/file" '^a$' || fail "couldn't read back root created file in directory"
+expect "echo a | sudo tee -a root-only/file" "sudo cat root-only/file" '^a\na$' || fail "couldn't read back root appended file in directory"
+expect "sudo ls -la root-only/." ' *file$' || fail "new root directory . does not point to self"
 
 cant "create file in dir owned by other user" "echo b | tee root-only/user-file" "cat root-only/user-file"
 cant "append to file owned by other user" "echo b | tee -a root-only/file" "pcregrep -M '^a\nb$ root-only/file"
 cant "make directory in dir owned by other user" "mkdir root-only/user-only" "stat root-only/user-only"
-fstats "root-only" "uid=root" "perm=drwxr-xr-x" || printf "${FAIL}: new root dir has incorrect permissions\n"
-fstats "root-only/file" "uid=root" "perm=-rw-r--r--" || printf "${FAIL}: new nested root file has incorrect permissions\n"
+fstats "root-only" "uid=root" "perm=drwxr-xr-x" || fail "new root dir has incorrect permissions"
+fstats "root-only/file" "uid=root" "perm=-rw-r--r--" || fail "new nested root file has incorrect permissions"
 
 
 section "Manipulating shared directories"
 # shared directory mkdir
-expect "sudo sh -c 'umask 0200; sg users \"mkdir shared\"'" '^$' || printf "${FAIL}: couldn't create group-owned directory\n"
-expect "sudo ls -la shared/.." ' *\.users/?$' || printf "${FAIL}: new shared directory .. doesn't point to root\n"
-fstats "shared" "uid=root" "gid=users" "perm=dr-xrwxr-x" || printf "${FAIL}: new shared dir has incorrect permissions\n"
+expect "sudo sh -c 'umask 0200; sg users \"mkdir shared\"'" '^$' || fail "couldn't create group-owned directory"
+expect "sudo ls -la shared/.." ' *\.users/?$' || fail "new shared directory .. doesn't point to root"
+fstats "shared" "uid=root" "gid=users" "perm=dr-xrwxr-x" || fail "new shared dir has incorrect permissions"
 
 # user file in shared dir
 user=$(id -un)
-expect "echo b | tee shared/user-file" "cat shared/user-file" '^b$' || printf "${FAIL}: couldn't create user file in shared directory\n"
-expect "echo b | tee -a shared/user-file" "cat shared/user-file" '^b\nb$' || printf "${FAIL}: couldn't appended to user file in shared directory\n"
-fstats "shared/user-file" "uid=$user" "perm=-rw-r--r--" || printf "${FAIL}: new user file has incorrect permissions\n"
+expect "echo b | tee shared/user-file" "cat shared/user-file" '^b$' || fail "couldn't create user file in shared directory"
+expect "echo b | tee -a shared/user-file" "cat shared/user-file" '^b\nb$' || fail "couldn't appended to user file in shared directory"
+fstats "shared/user-file" "uid=$user" "perm=-rw-r--r--" || fail "new user file has incorrect permissions"
 cant "append to file owned by other user as root" "echo x | sudo tee -a shared/user-file" "pcregrep -M '^b\nx$ shared/user-file"
 
 
 section "Manipulating non-owner directories"
 # user dir in shared dir
-expect "mkdir shared/user-only" '^$' || printf "${FAIL}: couldn't make user directory in shared dir\n"
-expect "ls -la shared/user-only" ' *\.\/?$' || printf "${FAIL}: new user directories don't have .\n"
-expect "ls -la shared/user-only" ' *\.\.\/?$' || printf "${FAIL}: new user directories don't have ..\n"
-expect "ls -la shared/user-only/.." ' *user-only/?$' || printf "${FAIL}: new user directory .. doesn't point to parent\n"
-expect "echo c | tee shared/user-only/file" "cat shared/user-only/file" '^c$' || printf "${FAIL}: couldn't read back user created file\n"
-expect "echo c | tee -a shared/user-only/file" "cat shared/user-only/file" '^c\nc$' || printf "${FAIL}: couldn't read back user appended file\n"
-expect "ls -la shared/user-only/." ' *file$' || printf "${FAIL}: new user directory . does not point to self\n"
+expect "mkdir shared/user-only" '^$' || fail "couldn't make user directory in shared dir"
+expect "ls -la shared/user-only" ' *\.\/?$' || fail "new user directories don't have ."
+expect "ls -la shared/user-only" ' *\.\.\/?$' || fail "new user directories don't have .."
+expect "ls -la shared/user-only/.." ' *user-only/?$' || fail "new user directory .. doesn't point to parent"
+expect "echo c | tee shared/user-only/file" "cat shared/user-only/file" '^c$' || fail "couldn't read back user created file"
+expect "echo c | tee -a shared/user-only/file" "cat shared/user-only/file" '^c\nc$' || fail "couldn't read back user appended file"
+expect "ls -la shared/user-only/." ' *file$' || fail "new user directory . does not point to self"
 
 cant "create file in dir owned by other user as root" "echo b | sudo tee shared/user-only/root-file" "cat shared/user-only/root-file"
 cant "append to file owned by other user as root" "echo x | sudo tee -a shared/user-only/file" "pcregrep -M '^c\nx$ shared/user-only/file"
 cant "make directory in dir owned by other user as root" "sudo mkdir shared/user-only/root-dir" "stat shared/user-only/root-dir"
-fstats "shared/user-only" "uid=$user" "perm=drwxr-xr-x" || printf "${FAIL}: new user dir has incorrect permissions\n"
-fstats "shared/user-only/file" "uid=$user" "perm=-rw-r--r--" || printf "${FAIL}: new nested user file has incorrect permissions\n"
+fstats "shared/user-only" "uid=$user" "perm=drwxr-xr-x" || fail "new user dir has incorrect permissions"
+fstats "shared/user-only/file" "uid=$user" "perm=-rw-r--r--" || fail "new nested user file has incorrect permissions"
 
 
 section "Restricted read permissions"
 # Encrypted files (no read permission)
-expect "sudo sh -c 'umask 0004; echo supercalifragilisticexpialidocious > root-secret'" '^$' || printf "${FAIL}: couldn't create user-readable file as user\n"
-expect "sudo cat root-secret" '^supercalifragilisticexpialidocious$' || printf "${FAIL}: couldn't read user-readable file as user\n"
-server_mem "user-readable" "supercalifragilisticexpialidocious"
-fstats "root-secret" "uid=root" "perm=-rw-------" || printf "${FAIL}: encrypted file has incorrect permissions\n"
+expect "sudo sh -c 'umask 0004; echo supercalifragilisticexpialidocious > root-secret'" '^$' || fail "couldn't create user-readable file as user"
+expect "sudo cat root-secret" '^supercalifragilisticexpialidocious$' || fail "couldn't read user-readable file as user"
+server_mem "user-readable file" "supercalifragilisticexpialidocious"
+fstats "root-secret" "uid=root" "perm=-rw-------" || fail "encrypted file has incorrect permissions"
 cant "read encrypted file belonging to other user" "cat root-secret"
-expect "echo y | sudo tee -a root-secret" "sudo cat root-secret" '^supercalifragilisticexpialidocious\ny$' || printf "${FAIL}: failed to append to encrypted file\n"
+expect "echo y | sudo tee -a root-secret" "sudo cat root-secret" '^supercalifragilisticexpialidocious\ny$' || fail "failed to append to encrypted file"
 
 # Encrypted shared files (no read permission)
-expect "sudo sh -c 'umask 0204; echo dociousaliexpilisticfragicalirupes | sg users \"tee group-secret\"'" '^dociousaliexpilisticfragicalirupes$' || printf "${FAIL}: couldn't create group-readable file as root\n"
-server_mem "group-readable" "dociousaliexpilisticfragicalirupes"
-fstats "group-secret" "uid=root" "gid=users" "perm=-r--rw----" || printf "${FAIL}: group encrypted file has incorrect permissions\n"
-expect "cat group-secret" '^dociousaliexpilisticfragicalirupes$' || printf "${FAIL}: couldn't read group-readable file as group member\n"
-expect "sudo cat group-secret" '^dociousaliexpilisticfragicalirupes$' || printf "${FAIL}: couldn't read group-readable file as non-owning group member\n"
-expect "echo z | sudo tee -a group-secret" "sudo cat group-secret" '^dociousaliexpilisticfragicalirupes\nz$' || printf "${FAIL}: failed to append to group encrypted file\n"
+expect "sudo sh -c 'umask 0204; echo dociousaliexpilisticfragicalirupes | sg users \"tee group-secret\"'" '^dociousaliexpilisticfragicalirupes$' || fail "couldn't create group-readable file as root"
+server_mem "group-readable file" "dociousaliexpilisticfragicalirupes"
+fstats "group-secret" "uid=root" "gid=users" "perm=-r--rw----" || fail "group encrypted file has incorrect permissions"
+expect "cat group-secret" '^dociousaliexpilisticfragicalirupes$' || fail "couldn't read group-readable file as group member"
+expect "sudo cat group-secret" '^dociousaliexpilisticfragicalirupes$' || fail "couldn't read group-readable file as non-owning group member"
+expect "echo z | sudo tee -a group-secret" "sudo cat group-secret" '^dociousaliexpilisticfragicalirupes\nz$' || fail "failed to append to group encrypted file"
+cant "read encrypted file belonging to group without being member" "sudo -u '#666' cat group-secret"
+
+# Encrypted directories
+expect "sudo sh -c 'umask 0004; mkdir root-secrets'" '^$' || fail "couldn't create user-readable directory as user"
+expect "echo a | sudo tee root-secrets/hidden-filename" "sudo cat root-secrets/hidden-filename" '^a$' || fail "couldn't read back root created file in encrypted directory"
+expect "echo a | sudo tee -a root-secrets/hidden-filename" "sudo cat root-secrets/hidden-filename" '^a\na$' || fail "couldn't read back root appended file in encrypted directory"
+server_mem "user-readable directory" "hidden-filename"
+cant "read encrypted directory belonging to other user" "ls root-secrets"
+cant "create file in encrypted directory belonging to other user" "touch root-secrets/sneaky-file"
 
 
 section "Read-only client with root key access"
 pushc "ro-client-with-root"
 client
-expect "ls -la" ' *\.\/?$' || printf "${FAIL}: root directory does not contain .\n"
-expect "ls -la" ' *\.\.\/?$' || printf "${FAIL}: root directory does not contain ..\n"
-expect "ls -la" ' *\.users$' || printf "${FAIL}: root directory does not contain .users\n"
-expect "ls -la" ' *\.groups$' || printf "${FAIL}: root directory does not contain .groups\n"
-fstats "." "uid=root" "perm=drwxr-xr-x" || printf "${FAIL}: root directory . has incorrect permissions\n"
-fstats ".users" "uid=root" "perm=-rw-r--r--" || printf "${FAIL}: /.users has incorrect permissions\n"
-fstats ".groups" "uid=root" "perm=-rw-r--r--" || printf "${FAIL}: /.groups has incorrect permissions\n"
-expect "cat .users" '.+' || printf "${FAIL}: .users couldn't be read\n"
-expect "cat .groups" '.+' || printf "${FAIL}: .groups couldn't be read\n"
+expect "ls -la" ' *\.\/?$' || fail "root directory does not contain ."
+expect "ls -la" ' *\.\.\/?$' || fail "root directory does not contain .."
+expect "ls -la" ' *\.users$' || fail "root directory does not contain .users"
+expect "ls -la" ' *\.groups$' || fail "root directory does not contain .groups"
+fstats "." "uid=root" "perm=drwxr-xr-x" || fail "root directory . has incorrect permissions"
+fstats ".users" "uid=root" "perm=-rw-r--r--" || fail "/.users has incorrect permissions"
+fstats ".groups" "uid=root" "perm=-rw-r--r--" || fail "/.groups has incorrect permissions"
+expect "cat .users" '.+' || fail ".users couldn't be read"
+expect "cat .groups" '.+' || fail ".groups couldn't be read"
 popc
 
 
 section "Read-only client without root key access"
 pushc "ro-client-without-root"
 client "root.pub" "user-$(id -u)-key.pem"
-expect "ls -la" ' *\.\/?$' || printf "${FAIL}: root directory does not contain .\n"
-expect "ls -la" ' *\.\.\/?$' || printf "${FAIL}: root directory does not contain ..\n"
-expect "ls -la" ' *\.users$' || printf "${FAIL}: root directory does not contain .users\n"
-expect "ls -la" ' *\.groups$' || printf "${FAIL}: root directory does not contain .groups\n"
-fstats "." "uid=root" "perm=drwxr-xr-x" || printf "${FAIL}: root directory . has incorrect permissions\n"
-fstats ".users" "uid=root" "perm=-rw-r--r--" || printf "${FAIL}: /.users has incorrect permissions\n"
-fstats ".groups" "uid=root" "perm=-rw-r--r--" || printf "${FAIL}: /.groups has incorrect permissions\n"
-expect "cat .users" '.+' || printf "${FAIL}: .users couldn't be read\n"
-expect "cat .groups" '.+' || printf "${FAIL}: .groups couldn't be read\n"
+expect "ls -la" ' *\.\/?$' || fail "root directory does not contain ."
+expect "ls -la" ' *\.\.\/?$' || fail "root directory does not contain .."
+expect "ls -la" ' *\.users$' || fail "root directory does not contain .users"
+expect "ls -la" ' *\.groups$' || fail "root directory does not contain .groups"
+fstats "." "uid=root" "perm=drwxr-xr-x" || fail "root directory . has incorrect permissions"
+fstats ".users" "uid=root" "perm=-rw-r--r--" || fail "/.users has incorrect permissions"
+fstats ".groups" "uid=root" "perm=-rw-r--r--" || fail "/.groups has incorrect permissions"
+expect "cat .users" '.+' || fail ".users couldn't be read"
+expect "cat .groups" '.+' || fail ".groups couldn't be read"
+popc
+
+
+section "Access to read-restricted files from other clients"
+pushc "remote-read-access"
+client
+# Encrypted files (no read permission)
+expect "sudo cat root-secret" '^supercalifragilisticexpialidocious\ny$' || fail "couldn't read user-readable file as user on second client"
+fstats "root-secret" "uid=root" "perm=-rw-------" || fail "encrypted file has incorrect permissions on second client"
+cant "read encrypted file belonging to other user" "cat root-secret"
+# Encrypted shared files (no read permission)
+fstats "group-secret" "uid=root" "gid=users" "perm=-r--rw----" || fail "group encrypted file has incorrect permissions on second client"
+expect "cat group-secret" '^dociousaliexpilisticfragicalirupes\nz$' || fail "couldn't read group-readable file as group member on second client"
+expect "sudo cat group-secret" '^dociousaliexpilisticfragicalirupes\nz$' || fail "couldn't read group-readable file as non-owning group member on second client"
+popc
+
+
+section "Access to read-restricted files with only user key"
+pushc "remote-read-access-no-root"
+client "root.pub" "user-$(id -u)-key.pem"
+# Encrypted shared files (no read permission)
+fstats "group-secret" "uid=root" "gid=users" "perm=-r--rw----" || fail "group encrypted file has incorrect permissions on client w/o root key"
+expect "cat group-secret" '^dociousaliexpilisticfragicalirupes\nz$' || fail "couldn't read group-readable file as group member on client w/o root key"
 popc
 
 
 section "Writing client"
 pushc "writing-client"
 client
-expect "echo b | tee shared/third-client-file" "cat shared/third-client-file" '^b$' || printf "${FAIL}: couldn't create file as user in separate client\n"
-expect "echo b | tee -a shared/third-client-file" "cat shared/third-client-file" '^b\nb$' || printf "${FAIL}: couldn't append to file as user in separate client\n"
+expect "echo b | tee shared/third-client-file" "cat shared/third-client-file" '^b$' || fail "couldn't create file as user in separate client"
+expect "echo b | tee -a shared/third-client-file" "cat shared/third-client-file" '^b\nb$' || fail "couldn't append to file as user in separate client"
 popc
 
-expect "cat shared/third-client-file" '^b\nb$' || printf "${FAIL}: couldn't read back file created by user in separate client\n"
+expect "cat shared/third-client-file" '^b\nb$' || fail "couldn't read back file created by user in separate client"
 
 
 section "Manipulating as non-member"
@@ -489,10 +222,10 @@ popc
 section "Forking attack!"
 pushc "forked-client"
 client
-printf "${INFO}: forking server\n" "$uri"
+info "forking server"
 kill -USR2 "$server"
-expect "echo b | tee shared/lost-to-fork" "cat shared/lost-to-fork" '^b$' || printf "${FAIL}: couldn't create file for forking test\n"
-printf "${INFO}: making server go back in time\n" "$uri"
+expect "echo b | tee shared/lost-to-fork" "cat shared/lost-to-fork" '^b$' || fail "couldn't create file for forking test"
+info "making server go back in time"
 kill -USR2 "$server"
 cant "trick client into accepting old changes" "grep b shared/lost-to-fork"
 popc
@@ -537,4 +270,4 @@ cant "successfully read file modified by malicious user" "grep be-afraid shared/
 
 cleanup
 
-printf "${INFO}: all tests done (passed %d/%d -- %.1f%%); cleaning up\n" "$passed" "$tests" "$(echo 100*$passed/$tests | bc -l)"
+info "all tests done (passed %d/%d -- %.1f%%); cleaning up\n" "$passed" "$tests" "$(echo "100*$passed/$tests" | bc -l)"
