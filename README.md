@@ -1,3 +1,7 @@
+<!-- lab5.html generedated from this file using: -->
+<!-- pandoc -f markdown_github-hard_line_breaks README.md -t html >> lab5.html -->
+<!-- make sure you keep the few lines including the stylesheet at the top! -->
+
 # SecFS - MIT 6.858 final lab
 
 ## Introduction
@@ -278,9 +282,10 @@ At a minimum, your file system should meet the following requirements:
    lists in sync or up to date --- if a user is later added to a group
    owning a particular group-readable file, it is fine if they are not
    able to read or write that file*.
- - File names (and directory names) should be treated as confidential.
-   That is, a user should be able to read-protect an entire directory,
-   and not leak file or directory names within that directory.
+ - File names (and directory names) inside read-protected directories
+   should be treated as confidential. That is, a user should be able to
+   read-protect an entire directory, and not leak file or directory
+   names within that directory.
  - Users should not be able to modify files or directories without being
    detected, unless they are authorized to do so.
  - Neither the server, nor any user not mentioned in a file's ACL,

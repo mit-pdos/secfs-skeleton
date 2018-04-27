@@ -295,6 +295,11 @@ class SecFS(llfuse.Operations):
     def open(self, inode, flags, ctx):
         print("OPEN", inode, flags)
 
+        # FUSE caches inodes and their attributes, and will sometimes not
+        # re-check permissions. this causes students sadness, so let's make
+        # their lives easier.
+        llfuse.invalidate_inode(inode)
+
         self._pre(User(ctx.uid))
 
         i = inodes[inode]

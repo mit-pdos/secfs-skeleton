@@ -36,7 +36,7 @@ class Directory:
 
         self.inode = secfs.fs.get_inode(i)
         if self.inode.kind != 0:
-            raise TypeError("inode with ihash {} is not a directory".format(ihash))
+            raise TypeError("inode with ihash {} is not a directory".format(secfs.tables.resolve(i)))
 
         cnt = self.inode.read()
         if len(cnt) != 0:
