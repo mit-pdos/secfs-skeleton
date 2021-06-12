@@ -11,6 +11,7 @@ class Inode:
         self.mtime = 0
         self.blocks = []
 
+    @staticmethod
     def load(ihash):
         """
         Loads all meta information about an inode given its ihandle.
