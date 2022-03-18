@@ -57,7 +57,7 @@ the latest commit in the repository's master branch that falls before
 the deadline.
 
 To access the repository, first register your group on the 
-[submission website](https://6858.scripts.mit.edu/2022/handin.py/) (or [with certificates](https://6858.scripts.mit.edu:444/2022/handin.py/)).
+[submission website](https://6858.scripts.mit.edu/2022/handin.py/).
 In the "Final Project" section, select an existing group 
 (or another group member if you come first), and then click "Join".
 **Note that the group assignment will freeze at some point**.
