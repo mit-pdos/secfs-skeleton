@@ -57,7 +57,7 @@ the latest commit in the repository's master branch that falls before
 the deadline.
 
 To access the repository, first register your group on the 
-[submission website](https://6858.scripts.mit.edu/2019/handin.py/) (or [with certificates](https://6858.scripts.mit.edu:444/2019/handin.py/)).
+[submission website](https://6858.scripts.mit.edu/2022/handin.py/) (or [with certificates](https://6858.scripts.mit.edu:444/2022/handin.py/)).
 In the "Final Project" section, select an existing group 
 (or another group member if you come first), and then click "Join".
 **Note that the group assignment will freeze at some point**.
@@ -67,7 +67,7 @@ Your repository URL will show up on the submission site.
 It typically looks like this:
 
 ```
-http://6858.scripts.mit.edu/2019/handin.py/git/project/<Your-API-Key-Hash>
+http://6858.scripts.mit.edu/2022/handin.py/git/project/<Your-API-Key-Hash>
 ```
 
 Note that other members in your group will see different URLs that contain
@@ -81,14 +81,14 @@ SecFS code skeleton:
 $ git clone https://github.com/mit-pdos/secfs-skeleton.git secfs
 $ cd secfs
 $ git remote rename origin upstream
-$ git remote add origin https://6858.scripts.mit.edu/2019/handin.py/git/project/<Your-API-Key-Hash>
+$ git remote add origin https://6858.scripts.mit.edu/2022/handin.py/git/project/<Your-API-Key-Hash>
 $ git push -u origin master
 ```
 
 After that, other members can simply clone from the group repository:
 
 ```
-$ git clone https://6858.scripts.mit.edu/2019/handin.py/git/project/<Their-API-Key-Hash> secfs
+$ git clone https://6858.scripts.mit.edu/2022/handin.py/git/project/<Their-API-Key-Hash> secfs
 $ cd secfs
 $ git remote add upstream https://github.com/mit-pdos/secfs-skeleton.git
 ```
@@ -97,8 +97,8 @@ Validate that your remote repositories are correct:
 
 ```
 $ git remote -v
-origin  https://6858.scripts.mit.edu/2019/handin.py/git/project/<Your-API-Key-Hash> (fetch)
-origin  https://6858.scripts.mit.edu/2019/handin.py/git/project/<Your-API-Key-Hash> (push)
+origin  https://6858.scripts.mit.edu/2022/handin.py/git/project/<Your-API-Key-Hash> (fetch)
+origin  https://6858.scripts.mit.edu/2022/handin.py/git/project/<Your-API-Key-Hash> (push)
 upstream    https://github.com/mit-pdos/secfs-skeleton.git (fetch)
 upstream    https://github.com/mit-pdos/secfs-skeleton.git (push)
 ```
@@ -111,7 +111,7 @@ If you reset your API key on the submission site, you must update the
 remote repository URL as well:
 
 ```
-$ git remote set-url origin https://6858.scripts.mit.edu/2019/handin.py/git/project/<New-API-Key-Hash>
+$ git remote set-url origin https://6858.scripts.mit.edu/2022/handin.py/git/project/<New-API-Key-Hash>
 ```
 
 If you are working on the project on your own, follow the same
